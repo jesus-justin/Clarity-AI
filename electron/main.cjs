@@ -206,7 +206,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
 
   const output = await replicate.run(MODEL, {
     input: {
-      image: buffer,
+      image: bufferToDataUrl(buffer, mimeType),
       scale,
       face_enhance: faceEnhance
     }
