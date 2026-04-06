@@ -1,6 +1,8 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
+const fsSyncfs = require('fs');
+const os = require('os');
 const axios = require('axios');
 const Store = require('electron-store').default;
 
@@ -72,6 +74,14 @@ function mimeToExtension(mimeType) {
 
 function bufferToDataUrl(buffer, mimeType) {
   return `data:${mimeType};base64,${buffer.toString('base64')}`;
+}
+
+async function bufferToTempFile(buffer, mimeType) {
+  const ext = mimeToExtension(mimeType);
+  const tempDir = os.tmpdir();
+  const tempFile = path.join(tempDir, `clarityai-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${ext}`);
+  await fs.writeFile(tempFile, buffer);
+  return tempFile;
 }
 
 function normalizeOutputUrls(output) {
@@ -188,58 +198,71 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
   });
 
   const { buffer, mimeType } = dataUrlToBuffer(dataUrl);
+  let tempFilePath = null;
 
-  sendStatus(event.sender, {
-    phase: 'uploading',
-    progress: 24,
-    message: 'Uploading the image to Replicate.'
-  });
+  try {
+    sendStatus(event.sender, {
+      phase: 'uploading',
+      progress: 24,
+      message: 'Uploading the image to Replicate.'
+    });
 
-  const Replicate = await loadReplicateClient();
-  const replicate = new Replicate({ auth: apiKey });
+    tempFilePath = await bufferToTempFile(buffer, mimeType);
 
-  sendStatus(event.sender, {
-    phase: 'processing',
-    progress: 45,
-    message: 'AI enhancement is running.'
-  });
+    const Replicate = await loadReplicateClient();
+    const replicate = new Replicate({ auth: apiKey });
 
-  const output = await replicate.run(MODEL, {
-    input: {
-      image: bufferToDataUrl(buffer, mimeType),
-      scale,
-      face_enhance: faceEnhance
+    sendStatus(event.sender, {
+      phase: 'processing',
+      progress: 45,
+      message: 'AI enhancement is running.'
+    });
+
+    const output = await replicate.run(MODEL, {
+      input: {
+        image: tempFilePath,
+        scale,
+        face_enhance: faceEnhance
+      }
+    });
+
+    const outputUrls = normalizeOutputUrls(output);
+
+    if (!outputUrls.length) {
+      throw new Error('Replicate returned no output image.');
     }
-  });
 
-  const outputUrls = normalizeOutputUrls(output);
+    sendStatus(event.sender, {
+      phase: 'downloading',
+      progress: 78,
+      message: 'Fetching the enhanced image.'
+    });
 
-  if (!outputUrls.length) {
-    throw new Error('Replicate returned no output image.');
+    const file = await fetchReplicateFile(apiKey, outputUrls[0]);
+
+    sendStatus(event.sender, {
+      phase: 'completed',
+      progress: 100,
+      message: 'Enhancement complete.'
+    });
+
+    const extension = mimeToExtension(file.mimeType);
+    const baseName = path.parse(fileName).name || 'clarityai-result';
+
+    return {
+      fileName: `${baseName}-clarityai.${extension}`,
+      dataUrl: bufferToDataUrl(file.buffer, file.mimeType),
+      mimeType: file.mimeType
+    };
+  } finally {
+    if (tempFilePath) {
+      try {
+        await fs.unlink(tempFilePath);
+      } catch {
+        // Ignore temp file cleanup errors
+      }
+    }
   }
-
-  sendStatus(event.sender, {
-    phase: 'downloading',
-    progress: 78,
-    message: 'Fetching the enhanced image.'
-  });
-
-  const file = await fetchReplicateFile(apiKey, outputUrls[0]);
-
-  sendStatus(event.sender, {
-    phase: 'completed',
-    progress: 100,
-    message: 'Enhancement complete.'
-  });
-
-  const extension = mimeToExtension(file.mimeType);
-  const baseName = path.parse(fileName).name || 'clarityai-result';
-
-  return {
-    fileName: `${baseName}-clarityai.${extension}`,
-    dataUrl: bufferToDataUrl(file.buffer, file.mimeType),
-    mimeType: file.mimeType
-  };
 });
 
 ipcMain.handle('clarityai:save-image', async (_event, payload) => {
