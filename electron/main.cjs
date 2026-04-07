@@ -1,7 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
-const fsSyncfs = require('fs');
 const os = require('os');
 const axios = require('axios');
 const Store = require('electron-store').default;
@@ -84,29 +83,87 @@ async function bufferToTempFile(buffer, mimeType) {
   return tempFile;
 }
 
-function normalizeOutputUrls(output) {
+async function normalizeOutputUrls(output) {
   if (!output) {
     return [];
   }
 
   const values = Array.isArray(output) ? output : [output];
-  return values
-    .map((item) => {
-      if (typeof item === 'string') {
-        return item;
-      }
+  const resolved = [];
 
-      if (item && typeof item.url === 'function') {
-        return item.url();
-      }
+  for (const item of values) {
+    if (!item) {
+      continue;
+    }
 
-      if (item && typeof item.url === 'string') {
-        return item.url;
-      }
+    if (typeof item === 'string') {
+      resolved.push(item);
+      continue;
+    }
 
-      return String(item);
-    })
-    .filter(Boolean);
+    if (typeof item.url === 'function') {
+      const nextUrl = await item.url();
+      if (nextUrl) {
+        resolved.push(nextUrl);
+      }
+      continue;
+    }
+
+    if (typeof item.url === 'string') {
+      resolved.push(item.url);
+      continue;
+    }
+
+    const nextValue = String(item);
+    if (nextValue && nextValue !== '[object Promise]') {
+      resolved.push(nextValue);
+    }
+  }
+
+  return resolved.filter(Boolean);
+}
+
+function collectCandidateKeyPaths() {
+  const candidatePaths = [
+    path.join(process.cwd(), 'api_key.txt'),
+    path.join(path.dirname(process.execPath), 'api_key.txt')
+  ];
+
+  if (process.resourcesPath) {
+    candidatePaths.push(path.join(process.resourcesPath, 'api_key.txt'));
+  }
+
+  if (app.isReady()) {
+    candidatePaths.push(path.join(app.getAppPath(), 'api_key.txt'));
+  }
+
+  return [...new Set(candidatePaths)];
+}
+
+async function readFirstAccessibleFile(filePaths) {
+  for (const filePath of filePaths) {
+    try {
+      return await fs.readFile(filePath, 'utf8');
+    } catch {
+      // Try the next location.
+    }
+  }
+
+  return '';
+}
+
+function extractApiKey(content) {
+  const text = String(content || '').trim();
+  if (!text) {
+    return '';
+  }
+
+  const match = text.match(/api_key\s*=\s*(\S+)/iu);
+  if (match?.[1]) {
+    return String(match[1]).trim();
+  }
+
+  return text.split(/\r?\n/u).map((line) => line.trim()).find(Boolean) || '';
 }
 
 async function fetchReplicateFile(apiKey, fileUrl) {
@@ -136,10 +193,8 @@ async function readApiKeyFromFile() {
   }
 
   try {
-    const keyFilePath = path.join(process.cwd(), 'api_key.txt');
-    const content = await fs.readFile(keyFilePath, 'utf8');
-    const match = content.match(/api_key\s*=\s*(\S+)/iu);
-    const fileKey = String(match?.[1] || '').trim();
+    const content = await readFirstAccessibleFile(collectCandidateKeyPaths());
+    const fileKey = extractApiKey(content);
     cachedFileApiKey = fileKey;
     return fileKey;
   } catch {
@@ -226,7 +281,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       }
     });
 
-    const outputUrls = normalizeOutputUrls(output);
+    const outputUrls = await normalizeOutputUrls(output);
 
     if (!outputUrls.length) {
       throw new Error('Replicate returned no output image.');
@@ -254,6 +309,14 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       dataUrl: bufferToDataUrl(file.buffer, file.mimeType),
       mimeType: file.mimeType
     };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'Enhancement failed.');
+    sendStatus(event.sender, {
+      phase: 'idle',
+      progress: 0,
+      message: 'Enhancement failed.'
+    });
+    throw new Error(message);
   } finally {
     if (tempFilePath) {
       try {

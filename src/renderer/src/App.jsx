@@ -62,6 +62,8 @@ function App() {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState(initialStatus);
+  const [scale, setScale] = useState(4);
+  const [faceEnhance, setFaceEnhance] = useState(true);
 
   const hasApiKey = Boolean(savedApiKey.trim());
   const canEnhance = Boolean(selectedFile && hasApiKey && !saving);
@@ -173,7 +175,9 @@ function App() {
         apiKey,
         dataUrl,
         fileName: selectedFile.name,
-        mimeType: selectedFile.type
+        mimeType: selectedFile.type,
+        scale,
+        faceEnhance
       });
 
       setResultImage(output);
@@ -294,6 +298,31 @@ function App() {
             <button className="secondary-button" type="button" onClick={handleSave} disabled={!resultImage}>
               Download Result
             </button>
+          </div>
+
+          <div className="enhancement-controls">
+            <label className="enhancement-control">
+              Upscale strength
+              <select value={scale} onChange={(event) => setScale(Number(event.target.value))} disabled={saving}>
+                <option value={2}>2x - light enhancement</option>
+                <option value={4}>4x - balanced HD (recommended)</option>
+                <option value={6}>6x - stronger detail recovery</option>
+                <option value={8}>8x - maximum detail boost</option>
+              </select>
+            </label>
+
+            <label className="enhancement-toggle">
+              <input
+                type="checkbox"
+                checked={faceEnhance}
+                onChange={(event) => setFaceEnhance(event.target.checked)}
+                disabled={saving}
+              />
+              <span>
+                <strong>Face enhancement</strong>
+                <small>Improves facial detail and clarity in portraits.</small>
+              </span>
+            </label>
           </div>
 
           <div className={`status-card ${statusTone}`}>
