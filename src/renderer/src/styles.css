@@ -23,9 +23,19 @@ html,
 body,
 #root {
   width: 100%;
-  min-height: 100%;
+  height: 100%;
   margin: 0;
   overflow-x: hidden;
+}
+
+html,
+body {
+  overflow: hidden;
+}
+
+#root {
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
 }
 
 body {
@@ -34,9 +44,6 @@ body {
     radial-gradient(circle at 85% 15%, rgba(96, 165, 250, 0.18), transparent 28%),
     linear-gradient(180deg, #050d18 0%, #07111f 45%, #0b1220 100%);
   color: var(--text);
-  min-height: 100vh;
-  overflow-y: scroll;
-  scrollbar-gutter: stable;
 }
 
 button,
@@ -56,7 +63,7 @@ img {
 .app-shell {
   position: relative;
   width: 100%;
-  min-height: 100vh;
+  min-height: 100%;
   padding: 28px;
   padding-bottom: 44px;
   overflow: visible;
