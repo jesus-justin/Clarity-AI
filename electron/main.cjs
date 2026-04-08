@@ -1,7 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
-const os = require('os');
 const axios = require('axios');
 const Store = require('electron-store').default;
 
@@ -73,14 +72,6 @@ function mimeToExtension(mimeType) {
 
 function bufferToDataUrl(buffer, mimeType) {
   return `data:${mimeType};base64,${buffer.toString('base64')}`;
-}
-
-async function bufferToTempFile(buffer, mimeType) {
-  const ext = mimeToExtension(mimeType);
-  const tempDir = os.tmpdir();
-  const tempFile = path.join(tempDir, `clarityai-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${ext}`);
-  await fs.writeFile(tempFile, buffer);
-  return tempFile;
 }
 
 async function normalizeOutputUrls(output) {
@@ -187,6 +178,24 @@ async function loadReplicateClient() {
   return mod.default;
 }
 
+function formatReplicateErrorMessage(error) {
+  const raw = error instanceof Error ? error.message : String(error || 'Enhancement failed.');
+
+  if (/status\s+402\s+Payment Required/iu.test(raw) || /Insufficient credit/iu.test(raw)) {
+    return 'Replicate account has insufficient credit. Add billing credits in Replicate, then try again.';
+  }
+
+  if (/status\s+401\s+Unauthorized/iu.test(raw)) {
+    return 'Replicate API key is invalid or expired. Update it in Settings and retry.';
+  }
+
+  if (/status\s+429/iu.test(raw)) {
+    return 'Replicate rate limit reached. Wait a moment, then retry enhancement.';
+  }
+
+  return raw;
+}
+
 async function readApiKeyFromFile() {
   if (cachedFileApiKey !== null) {
     return cachedFileApiKey;
@@ -253,7 +262,6 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
   });
 
   const { buffer, mimeType } = dataUrlToBuffer(dataUrl);
-  let tempFilePath = null;
 
   try {
     sendStatus(event.sender, {
@@ -262,10 +270,8 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       message: 'Uploading the image to Replicate.'
     });
 
-    tempFilePath = await bufferToTempFile(buffer, mimeType);
-
     const Replicate = await loadReplicateClient();
-    const replicate = new Replicate({ auth: apiKey });
+    const replicate = new Replicate({ auth: apiKey, fileEncodingStrategy: 'upload' });
 
     sendStatus(event.sender, {
       phase: 'processing',
@@ -275,7 +281,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
 
     const output = await replicate.run(MODEL, {
       input: {
-        image: tempFilePath,
+        image: buffer,
         scale,
         face_enhance: faceEnhance
       }
@@ -310,21 +316,13 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       mimeType: file.mimeType
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error || 'Enhancement failed.');
+    const message = formatReplicateErrorMessage(error);
     sendStatus(event.sender, {
       phase: 'idle',
       progress: 0,
       message: 'Enhancement failed.'
     });
     throw new Error(message);
-  } finally {
-    if (tempFilePath) {
-      try {
-        await fs.unlink(tempFilePath);
-      } catch {
-        // Ignore temp file cleanup errors
-      }
-    }
   }
 });
 

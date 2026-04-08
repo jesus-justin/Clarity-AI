@@ -187,7 +187,7 @@ function App() {
         message: 'Enhancement complete.'
       });
     } catch (enhanceError) {
-      setError(enhanceError?.message || 'Enhancement failed.');
+      setError(formatEnhancementError(enhanceError));
       setStatus({
         phase: 'idle',
         progress: 0,
@@ -412,6 +412,11 @@ function formatFileSize(bytes) {
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   const value = bytes / 1024 ** index;
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`;
+}
+
+function formatEnhancementError(error) {
+  const raw = String(error?.message || error || 'Enhancement failed.');
+  return raw.replace(/^Error invoking remote method 'clarityai:enhance-image':\s*/u, '').trim();
 }
 
 export default App;
