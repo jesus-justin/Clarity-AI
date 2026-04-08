@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const axios = require('axios');
+const sharp = require('sharp');
 const Store = require('electron-store').default;
 
 const MODEL = 'nightmareai/real-esrgan';
@@ -196,6 +197,60 @@ function formatReplicateErrorMessage(error) {
   return raw;
 }
 
+function clampScale(inputScale) {
+  const value = Number(inputScale);
+  if (!Number.isFinite(value)) {
+    return 4;
+  }
+
+  return Math.max(2, Math.min(8, Math.round(value)));
+}
+
+async function enhanceImageLocally(buffer, mimeType, scale) {
+  const normalizedScale = clampScale(scale);
+  const source = sharp(buffer, { failOn: 'none' }).rotate();
+  const metadata = await source.metadata();
+
+  const sourceWidth = Number(metadata.width || 0);
+  const sourceHeight = Number(metadata.height || 0);
+
+  let targetWidth = sourceWidth > 0 ? Math.round(sourceWidth * normalizedScale) : 0;
+  let targetHeight = sourceHeight > 0 ? Math.round(sourceHeight * normalizedScale) : 0;
+
+  const maxSide = 4096;
+  const largestSide = Math.max(targetWidth, targetHeight);
+  if (largestSide > maxSide) {
+    const ratio = maxSide / largestSide;
+    targetWidth = Math.max(1, Math.round(targetWidth * ratio));
+    targetHeight = Math.max(1, Math.round(targetHeight * ratio));
+  }
+
+  let pipeline = sharp(buffer, { failOn: 'none' })
+    .rotate()
+    .normalize()
+    .sharpen({ sigma: 1.2, m1: 0.6, m2: 1.4, x1: 2, y2: 10, y3: 20 });
+
+  if (targetWidth > 0 && targetHeight > 0) {
+    pipeline = pipeline.resize(targetWidth, targetHeight, {
+      kernel: sharp.kernel.lanczos3,
+      fit: 'fill'
+    });
+  }
+
+  if (mimeType === 'image/jpeg') {
+    const outputBuffer = await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
+    return { buffer: outputBuffer, mimeType: 'image/jpeg' };
+  }
+
+  if (mimeType === 'image/webp') {
+    const outputBuffer = await pipeline.webp({ quality: 95 }).toBuffer();
+    return { buffer: outputBuffer, mimeType: 'image/webp' };
+  }
+
+  const outputBuffer = await pipeline.png({ quality: 95, compressionLevel: 8 }).toBuffer();
+  return { buffer: outputBuffer, mimeType: 'image/png' };
+}
+
 async function readApiKeyFromFile() {
   if (cachedFileApiKey !== null) {
     return cachedFileApiKey;
@@ -246,14 +301,11 @@ ipcMain.handle('clarityai:save-settings', async (_event, payload) => {
 ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
   const apiKey = await resolveApiKey(payload?.apiKey);
 
-  if (!apiKey) {
-    throw new Error('Add your Replicate API key in Settings before enhancing an image.');
-  }
-
   const dataUrl = String(payload?.dataUrl || '');
   const fileName = String(payload?.fileName || 'enhanced-image');
-  const scale = Number.isFinite(Number(payload?.scale)) ? Number(payload.scale) : 4;
+  const scale = clampScale(payload?.scale);
   const faceEnhance = Boolean(payload?.faceEnhance);
+  const usingCloud = Boolean(apiKey);
 
   sendStatus(event.sender, {
     phase: 'preparing',
@@ -264,42 +316,59 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
   const { buffer, mimeType } = dataUrlToBuffer(dataUrl);
 
   try {
-    sendStatus(event.sender, {
-      phase: 'uploading',
-      progress: 24,
-      message: 'Uploading the image to Replicate.'
-    });
+    let file;
+    if (usingCloud) {
+      sendStatus(event.sender, {
+        phase: 'uploading',
+        progress: 24,
+        message: 'Uploading the image to Replicate.'
+      });
 
-    const Replicate = await loadReplicateClient();
-    const replicate = new Replicate({ auth: apiKey, fileEncodingStrategy: 'upload' });
+      const Replicate = await loadReplicateClient();
+      const replicate = new Replicate({ auth: apiKey, fileEncodingStrategy: 'upload' });
 
-    sendStatus(event.sender, {
-      phase: 'processing',
-      progress: 45,
-      message: 'AI enhancement is running.'
-    });
+      sendStatus(event.sender, {
+        phase: 'processing',
+        progress: 45,
+        message: 'Cloud AI enhancement is running.'
+      });
 
-    const output = await replicate.run(MODEL, {
-      input: {
-        image: buffer,
-        scale,
-        face_enhance: faceEnhance
+      const output = await replicate.run(MODEL, {
+        input: {
+          image: buffer,
+          scale,
+          face_enhance: faceEnhance
+        }
+      });
+
+      const outputUrls = await normalizeOutputUrls(output);
+
+      if (!outputUrls.length) {
+        throw new Error('Replicate returned no output image.');
       }
-    });
 
-    const outputUrls = await normalizeOutputUrls(output);
+      sendStatus(event.sender, {
+        phase: 'downloading',
+        progress: 78,
+        message: 'Fetching the enhanced image.'
+      });
 
-    if (!outputUrls.length) {
-      throw new Error('Replicate returned no output image.');
+      file = await fetchReplicateFile(apiKey, outputUrls[0]);
+    } else {
+      sendStatus(event.sender, {
+        phase: 'processing',
+        progress: 45,
+        message: 'Running free local enhancement.'
+      });
+
+      file = await enhanceImageLocally(buffer, mimeType, scale);
+
+      sendStatus(event.sender, {
+        phase: 'downloading',
+        progress: 78,
+        message: 'Preparing the enhanced result.'
+      });
     }
-
-    sendStatus(event.sender, {
-      phase: 'downloading',
-      progress: 78,
-      message: 'Fetching the enhanced image.'
-    });
-
-    const file = await fetchReplicateFile(apiKey, outputUrls[0]);
 
     sendStatus(event.sender, {
       phase: 'completed',
@@ -309,14 +378,15 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
 
     const extension = mimeToExtension(file.mimeType);
     const baseName = path.parse(fileName).name || 'clarityai-result';
+    const outputSuffix = usingCloud ? 'clarityai' : 'clarityai-local';
 
     return {
-      fileName: `${baseName}-clarityai.${extension}`,
+      fileName: `${baseName}-${outputSuffix}.${extension}`,
       dataUrl: bufferToDataUrl(file.buffer, file.mimeType),
       mimeType: file.mimeType
     };
   } catch (error) {
-    const message = formatReplicateErrorMessage(error);
+    const message = usingCloud ? formatReplicateErrorMessage(error) : (error instanceof Error ? error.message : String(error || 'Enhancement failed.'));
     sendStatus(event.sender, {
       phase: 'idle',
       progress: 0,

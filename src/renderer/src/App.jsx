@@ -66,7 +66,7 @@ function App() {
   const [faceEnhance, setFaceEnhance] = useState(true);
 
   const hasApiKey = Boolean(savedApiKey.trim());
-  const canEnhance = Boolean(selectedFile && hasApiKey && !saving);
+  const canEnhance = Boolean(selectedFile && !saving);
 
   const statusTone = useMemo(() => {
     if (status.phase === 'completed') {
@@ -151,12 +151,6 @@ function App() {
   async function handleEnhance() {
     if (!selectedFile) {
       setError('Choose an image first.');
-      return;
-    }
-
-    if (!apiKey.trim()) {
-      setSettingsOpen(true);
-      setError('Add your Replicate API key in Settings to continue.');
       return;
     }
 
@@ -284,8 +278,8 @@ function App() {
                 <div className="upload-badge">Drop image here</div>
                 <h2>Drag and drop, or click to upload</h2>
                 <p>
-                  Supported formats: JPG, PNG, and WEBP. The image is enhanced locally through your
-                  Replicate API key and returned as a downloadable result.
+                  Supported formats: JPG, PNG, and WEBP. Free local enhancement works without credits,
+                  and Replicate cloud AI is used automatically when an API key is set.
                 </p>
               </>
             )}
@@ -328,7 +322,7 @@ function App() {
           <div className={`status-card ${statusTone}`}>
             <ProgressBar progress={status.progress} message={status.message} />
             {!hasApiKey ? (
-              <p className="status-note">Add your Replicate API key in Settings before starting.</p>
+              <p className="status-note">Free local mode is active. Add a Replicate API key in Settings to use cloud AI.</p>
             ) : null}
             {error ? <p className="status-error">{error}</p> : null}
           </div>
@@ -343,7 +337,7 @@ function App() {
           />
           <PreviewCard
             title="After"
-            subtitle="Replicate enhanced output"
+            subtitle={hasApiKey ? 'Replicate cloud AI output' : 'Free local enhancement output'}
             src={resultImage?.dataUrl}
             emptyText="The enhanced result will appear here after processing."
             tone="accent"

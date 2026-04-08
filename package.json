@@ -18,7 +18,8 @@
     "electron-store": "^10.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "replicate": "^1.0.0"
+    "replicate": "^1.0.0",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.2",
@@ -46,7 +47,9 @@
       "target": [
         {
           "target": "zip",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
