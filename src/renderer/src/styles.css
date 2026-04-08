@@ -23,8 +23,9 @@ html,
 body,
 #root {
   width: 100%;
-  height: 100%;
+  min-height: 100%;
   margin: 0;
+  overflow-x: hidden;
 }
 
 body {
@@ -33,8 +34,9 @@ body {
     radial-gradient(circle at 85% 15%, rgba(96, 165, 250, 0.18), transparent 28%),
     linear-gradient(180deg, #050d18 0%, #07111f 45%, #0b1220 100%);
   color: var(--text);
-  overflow-y: auto;
-  overflow-x: hidden;
+  min-height: 100vh;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
 }
 
 button,
@@ -54,10 +56,10 @@ img {
 .app-shell {
   position: relative;
   width: 100%;
-  min-height: 100%;
+  min-height: 100vh;
   padding: 28px;
-  overflow-y: auto;
-  overflow-x: hidden;
+  padding-bottom: 44px;
+  overflow: visible;
 }
 
 .bg-orb {
@@ -141,7 +143,8 @@ img {
   display: grid;
   grid-template-columns: minmax(360px, 480px) minmax(0, 1fr);
   gap: 22px;
-  min-height: calc(100% - 92px);
+  height: auto;
+  align-items: start;
 }
 
 .hero-panel,
