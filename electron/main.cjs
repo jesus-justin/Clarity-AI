@@ -287,16 +287,13 @@ function clampScale(inputScale) {
   return Math.max(2, Math.min(8, Math.round(value)));
 }
 
-async function enhanceImageLocally(buffer, mimeType, scale) {
+function calculateTargetSize(width, height, scale) {
   const normalizedScale = clampScale(scale);
-  const source = sharp(buffer, { failOn: 'none' }).rotate();
-  const metadata = await source.metadata();
+  const sourceWidth = Math.max(1, Number(width || 1));
+  const sourceHeight = Math.max(1, Number(height || 1));
 
-  const sourceWidth = Number(metadata.width || 0);
-  const sourceHeight = Number(metadata.height || 0);
-
-  let targetWidth = sourceWidth > 0 ? Math.round(sourceWidth * normalizedScale) : 0;
-  let targetHeight = sourceHeight > 0 ? Math.round(sourceHeight * normalizedScale) : 0;
+  let targetWidth = Math.round(sourceWidth * normalizedScale);
+  let targetHeight = Math.round(sourceHeight * normalizedScale);
 
   const maxSide = 4096;
   const largestSide = Math.max(targetWidth, targetHeight);
@@ -306,10 +303,74 @@ async function enhanceImageLocally(buffer, mimeType, scale) {
     targetHeight = Math.max(1, Math.round(targetHeight * ratio));
   }
 
+  return { targetWidth, targetHeight, normalizedScale };
+}
+
+async function preprocessInputImage(buffer, mimeType, scale) {
+  const metadata = await sharp(buffer, { failOn: 'none' }).rotate().metadata();
+  const { targetWidth, targetHeight } = calculateTargetSize(metadata.width, metadata.height, scale);
+
+  // Reduce blur/noise before enhancement so cloud/local upscaling receives a cleaner signal.
+  const preprocessedBuffer = await sharp(buffer, { failOn: 'none' })
+    .rotate()
+    .normalize()
+    .sharpen({ sigma: 1.45, m1: 0.7, m2: 1.7, x1: 2, y2: 12, y3: 24 })
+    .toBuffer();
+
+  return {
+    buffer: preprocessedBuffer,
+    mimeType,
+    targetWidth,
+    targetHeight
+  };
+}
+
+async function postprocessEnhancedImage(buffer, mimeType) {
   let pipeline = sharp(buffer, { failOn: 'none' })
     .rotate()
     .normalize()
-    .sharpen({ sigma: 1.2, m1: 0.6, m2: 1.4, x1: 2, y2: 10, y3: 20 });
+    .modulate({ brightness: 1.02, saturation: 1.04 })
+    .sharpen({ sigma: 1.35, m1: 0.8, m2: 1.9, x1: 2, y2: 11, y3: 22 });
+
+  if (mimeType === 'image/jpeg') {
+    return {
+      buffer: await pipeline.jpeg({ quality: 96, mozjpeg: true }).toBuffer(),
+      mimeType: 'image/jpeg'
+    };
+  }
+
+  if (mimeType === 'image/webp') {
+    return {
+      buffer: await pipeline.webp({ quality: 96 }).toBuffer(),
+      mimeType: 'image/webp'
+    };
+  }
+
+  return {
+    buffer: await pipeline.png({ quality: 96, compressionLevel: 8 }).toBuffer(),
+    mimeType: 'image/png'
+  };
+}
+
+async function enhanceImageLocally(buffer, mimeType, scale) {
+  const source = sharp(buffer, { failOn: 'none' }).rotate();
+  const metadata = await source.metadata();
+
+  const { targetWidth, targetHeight } = calculateTargetSize(metadata.width, metadata.height, scale);
+
+  // Two-step upscaling improves clarity on blurry faces more than a single aggressive resize.
+  const intermediateWidth = Math.max(1, Math.round((metadata.width || targetWidth) * 2));
+  const intermediateHeight = Math.max(1, Math.round((metadata.height || targetHeight) * 2));
+
+  let pipeline = sharp(buffer, { failOn: 'none' })
+    .rotate()
+    .resize(intermediateWidth, intermediateHeight, {
+      kernel: sharp.kernel.lanczos3,
+      fit: 'fill'
+    })
+    .sharpen({ sigma: 1.55, m1: 0.8, m2: 1.8, x1: 2, y2: 12, y3: 24 })
+    .normalize()
+    .sharpen({ sigma: 1.3, m1: 0.65, m2: 1.5, x1: 2, y2: 10, y3: 20 });
 
   if (targetWidth > 0 && targetHeight > 0) {
     pipeline = pipeline.resize(targetWidth, targetHeight, {
@@ -396,6 +457,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
   });
 
   const { buffer, mimeType } = dataUrlToBuffer(dataUrl);
+  const preparedInput = await preprocessInputImage(buffer, mimeType, scale);
 
   try {
     let file;
@@ -421,7 +483,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
 
           const output = await replicate.run(MODEL, {
             input: {
-              image: buffer,
+              image: preparedInput.buffer,
               scale,
               face_enhance: faceEnhance
             }
@@ -455,7 +517,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
             message: 'Cloud AI enhancement is running (Gemini).'
           });
 
-          file = await enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhance);
+          file = await enhanceImageWithGemini(apiKey, preparedInput.buffer, mimeType, scale, faceEnhance);
 
           sendStatus(event.sender, {
             phase: 'downloading',
@@ -479,7 +541,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
           message: `${cloudMessage} Switching to free local enhancement.`
         });
 
-        file = await enhanceImageLocally(buffer, mimeType, scale);
+        file = await enhanceImageLocally(preparedInput.buffer, mimeType, scale);
 
         sendStatus(event.sender, {
           phase: 'downloading',
@@ -494,7 +556,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
         message: 'Running free local enhancement.'
       });
 
-      file = await enhanceImageLocally(buffer, mimeType, scale);
+      file = await enhanceImageLocally(preparedInput.buffer, mimeType, scale);
 
       sendStatus(event.sender, {
         phase: 'downloading',
@@ -509,14 +571,16 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       message: usedCloud ? `Enhancement complete (cloud AI: ${cloudProvider}).` : 'Enhancement complete (free local mode).'
     });
 
-    const extension = mimeToExtension(file.mimeType);
+    const polishedFile = await postprocessEnhancedImage(file.buffer, file.mimeType);
+
+    const extension = mimeToExtension(polishedFile.mimeType);
     const baseName = path.parse(fileName).name || 'clarityai-result';
     const outputSuffix = usedCloud ? `clarityai-${cloudProvider}` : 'clarityai-local';
 
     return {
       fileName: `${baseName}-${outputSuffix}.${extension}`,
-      dataUrl: bufferToDataUrl(file.buffer, file.mimeType),
-      mimeType: file.mimeType
+      dataUrl: bufferToDataUrl(polishedFile.buffer, polishedFile.mimeType),
+      mimeType: polishedFile.mimeType
     };
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error || 'Enhancement failed.');
