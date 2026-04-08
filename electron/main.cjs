@@ -197,6 +197,87 @@ function formatReplicateErrorMessage(error) {
   return raw;
 }
 
+function formatGeminiErrorMessage(error) {
+  const raw = error instanceof Error ? error.message : String(error || 'Enhancement failed.');
+
+  if (/status code 400/iu.test(raw) || /400 Bad Request/iu.test(raw)) {
+    return 'Gemini request was rejected. Check the API key permissions or model access in Google AI Studio.';
+  }
+
+  if (/status code 401/iu.test(raw) || /401 Unauthorized/iu.test(raw) || /status code 403/iu.test(raw)) {
+    return 'Gemini API key is invalid or lacks permissions. Update it in Settings and retry.';
+  }
+
+  if (/status code 429/iu.test(raw)) {
+    return 'Gemini rate limit reached. Wait a moment, then retry enhancement.';
+  }
+
+  return raw;
+}
+
+function detectApiProvider(apiKey) {
+  const key = String(apiKey || '').trim();
+  if (!key) {
+    return 'none';
+  }
+
+  if (/^r8_/iu.test(key)) {
+    return 'replicate';
+  }
+
+  if (/^AIza[\w-]{20,}$/u.test(key)) {
+    return 'gemini';
+  }
+
+  return 'unknown';
+}
+
+async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhance) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const prompt = [
+    `Enhance this photo to clear high-definition quality at about ${scale}x perceived detail improvement.`,
+    'Preserve the exact person, pose, framing, and identity.',
+    'Reduce blur and noise while keeping natural colors and textures.',
+    faceEnhance ? 'Prioritize face clarity and natural skin detail.' : 'Do not over-smooth facial details.',
+    'Return an enhanced realistic photo, no stylization, no artistic effects.'
+  ].join(' ');
+
+  const payload = {
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { text: prompt },
+          {
+            inline_data: {
+              mime_type: mimeType,
+              data: buffer.toString('base64')
+            }
+          }
+        ]
+      }
+    ],
+    generationConfig: {
+      responseModalities: ['TEXT', 'IMAGE']
+    }
+  };
+
+  const response = await axios.post(url, payload, { timeout: 120000 });
+  const parts = response?.data?.candidates?.[0]?.content?.parts || [];
+  const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
+
+  const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
+  const outputMime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || 'image/png';
+  if (!encoded) {
+    throw new Error('Gemini returned no image output.');
+  }
+
+  return {
+    buffer: Buffer.from(encoded, 'base64'),
+    mimeType: outputMime
+  };
+}
+
 function clampScale(inputScale) {
   const value = Number(inputScale);
   if (!Number.isFinite(value)) {
@@ -305,7 +386,8 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
   const fileName = String(payload?.fileName || 'enhanced-image');
   const scale = clampScale(payload?.scale);
   const faceEnhance = Boolean(payload?.faceEnhance);
-  const usingCloud = Boolean(apiKey);
+  const provider = detectApiProvider(apiKey);
+  const usingCloud = provider === 'replicate' || provider === 'gemini';
 
   sendStatus(event.sender, {
     phase: 'preparing',
@@ -317,43 +399,94 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
 
   try {
     let file;
+    let usedCloud = false;
+    let cloudProvider = 'local';
     if (usingCloud) {
-      sendStatus(event.sender, {
-        phase: 'uploading',
-        progress: 24,
-        message: 'Uploading the image to Replicate.'
-      });
+      try {
+        if (provider === 'replicate') {
+          sendStatus(event.sender, {
+            phase: 'uploading',
+            progress: 24,
+            message: 'Uploading the image to Replicate.'
+          });
 
-      const Replicate = await loadReplicateClient();
-      const replicate = new Replicate({ auth: apiKey, fileEncodingStrategy: 'upload' });
+          const Replicate = await loadReplicateClient();
+          const replicate = new Replicate({ auth: apiKey, fileEncodingStrategy: 'upload' });
 
-      sendStatus(event.sender, {
-        phase: 'processing',
-        progress: 45,
-        message: 'Cloud AI enhancement is running.'
-      });
+          sendStatus(event.sender, {
+            phase: 'processing',
+            progress: 45,
+            message: 'Cloud AI enhancement is running (Replicate).'
+          });
 
-      const output = await replicate.run(MODEL, {
-        input: {
-          image: buffer,
-          scale,
-          face_enhance: faceEnhance
+          const output = await replicate.run(MODEL, {
+            input: {
+              image: buffer,
+              scale,
+              face_enhance: faceEnhance
+            }
+          });
+
+          const outputUrls = await normalizeOutputUrls(output);
+
+          if (!outputUrls.length) {
+            throw new Error('Replicate returned no output image.');
+          }
+
+          sendStatus(event.sender, {
+            phase: 'downloading',
+            progress: 78,
+            message: 'Fetching the enhanced image.'
+          });
+
+          file = await fetchReplicateFile(apiKey, outputUrls[0]);
+          usedCloud = true;
+          cloudProvider = 'replicate';
+        } else if (provider === 'gemini') {
+          sendStatus(event.sender, {
+            phase: 'uploading',
+            progress: 24,
+            message: 'Uploading the image to Gemini.'
+          });
+
+          sendStatus(event.sender, {
+            phase: 'processing',
+            progress: 45,
+            message: 'Cloud AI enhancement is running (Gemini).'
+          });
+
+          file = await enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhance);
+
+          sendStatus(event.sender, {
+            phase: 'downloading',
+            progress: 78,
+            message: 'Preparing the Gemini-enhanced image.'
+          });
+
+          usedCloud = true;
+          cloudProvider = 'gemini';
+        } else {
+          throw new Error('Unsupported cloud key format.');
         }
-      });
+      } catch (cloudError) {
+        const cloudMessage = provider === 'replicate'
+          ? formatReplicateErrorMessage(cloudError)
+          : formatGeminiErrorMessage(cloudError);
 
-      const outputUrls = await normalizeOutputUrls(output);
+        sendStatus(event.sender, {
+          phase: 'processing',
+          progress: 42,
+          message: `${cloudMessage} Switching to free local enhancement.`
+        });
 
-      if (!outputUrls.length) {
-        throw new Error('Replicate returned no output image.');
+        file = await enhanceImageLocally(buffer, mimeType, scale);
+
+        sendStatus(event.sender, {
+          phase: 'downloading',
+          progress: 78,
+          message: 'Preparing the enhanced result.'
+        });
       }
-
-      sendStatus(event.sender, {
-        phase: 'downloading',
-        progress: 78,
-        message: 'Fetching the enhanced image.'
-      });
-
-      file = await fetchReplicateFile(apiKey, outputUrls[0]);
     } else {
       sendStatus(event.sender, {
         phase: 'processing',
@@ -373,12 +506,12 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
     sendStatus(event.sender, {
       phase: 'completed',
       progress: 100,
-      message: 'Enhancement complete.'
+      message: usedCloud ? `Enhancement complete (cloud AI: ${cloudProvider}).` : 'Enhancement complete (free local mode).'
     });
 
     const extension = mimeToExtension(file.mimeType);
     const baseName = path.parse(fileName).name || 'clarityai-result';
-    const outputSuffix = usingCloud ? 'clarityai' : 'clarityai-local';
+    const outputSuffix = usedCloud ? `clarityai-${cloudProvider}` : 'clarityai-local';
 
     return {
       fileName: `${baseName}-${outputSuffix}.${extension}`,
@@ -386,7 +519,12 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       mimeType: file.mimeType
     };
   } catch (error) {
-    const message = usingCloud ? formatReplicateErrorMessage(error) : (error instanceof Error ? error.message : String(error || 'Enhancement failed.'));
+    const rawMessage = error instanceof Error ? error.message : String(error || 'Enhancement failed.');
+    const message = /api\.replicate\.com\/v1/iu.test(rawMessage)
+      ? formatReplicateErrorMessage(error)
+      : /generativelanguage\.googleapis\.com/iu.test(rawMessage)
+        ? formatGeminiErrorMessage(error)
+        : rawMessage;
     sendStatus(event.sender, {
       phase: 'idle',
       progress: 0,

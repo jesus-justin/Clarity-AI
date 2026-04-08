@@ -67,6 +67,7 @@ function App() {
 
   const hasApiKey = Boolean(savedApiKey.trim());
   const canEnhance = Boolean(selectedFile && !saving);
+  const providerName = useMemo(() => detectProviderName(savedApiKey), [savedApiKey]);
 
   const statusTone = useMemo(() => {
     if (status.phase === 'completed') {
@@ -279,7 +280,7 @@ function App() {
                 <h2>Drag and drop, or click to upload</h2>
                 <p>
                   Supported formats: JPG, PNG, and WEBP. Free local enhancement works without credits,
-                  and Replicate cloud AI is used automatically when an API key is set.
+                  and cloud AI (Replicate or Gemini) is used automatically when a compatible API key is set.
                 </p>
               </>
             )}
@@ -322,7 +323,7 @@ function App() {
           <div className={`status-card ${statusTone}`}>
             <ProgressBar progress={status.progress} message={status.message} />
             {!hasApiKey ? (
-              <p className="status-note">Free local mode is active. Add a Replicate API key in Settings to use cloud AI.</p>
+              <p className="status-note">Free local mode is active. Add a Replicate or Gemini API key in Settings to use cloud AI.</p>
             ) : null}
             {error ? <p className="status-error">{error}</p> : null}
           </div>
@@ -337,7 +338,7 @@ function App() {
           />
           <PreviewCard
             title="After"
-            subtitle={hasApiKey ? 'Replicate cloud AI output' : 'Free local enhancement output'}
+            subtitle={hasApiKey ? `${providerName} cloud AI output` : 'Free local enhancement output'}
             src={resultImage?.dataUrl}
             emptyText="The enhanced result will appear here after processing."
             tone="accent"
@@ -351,7 +352,7 @@ function App() {
             <div className="settings-modal-header">
               <div>
                 <p className="eyebrow">Settings</p>
-                <h2>Replicate API key</h2>
+                <h2>Cloud API key</h2>
               </div>
               <button className="icon-button subtle" type="button" onClick={() => setSettingsOpen(false)}>
                 Close
@@ -365,12 +366,12 @@ function App() {
                   type="password"
                   value={apiKey}
                   onChange={(event) => setApiKey(event.target.value)}
-                  placeholder="r8_********************************"
+                  placeholder="r8_... or AIza..."
                   autoComplete="off"
                 />
               </label>
               <p className="settings-help">
-                Your key is stored locally with electron-store and only used to call Replicate from this machine.
+                Your key is stored locally with electron-store and only used for cloud enhancement from this machine.
               </p>
               <div className="settings-actions">
                 <button className="secondary-button" type="button" onClick={() => setSettingsOpen(false)}>
@@ -411,6 +412,19 @@ function formatFileSize(bytes) {
 function formatEnhancementError(error) {
   const raw = String(error?.message || error || 'Enhancement failed.');
   return raw.replace(/^Error invoking remote method 'clarityai:enhance-image':\s*/u, '').trim();
+}
+
+function detectProviderName(apiKey) {
+  const value = String(apiKey || '').trim();
+  if (/^r8_/iu.test(value)) {
+    return 'Replicate';
+  }
+
+  if (/^AIza[\w-]{20,}$/u.test(value)) {
+    return 'Gemini';
+  }
+
+  return 'Cloud';
 }
 
 export default App;
