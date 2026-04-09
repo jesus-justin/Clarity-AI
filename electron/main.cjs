@@ -12,8 +12,6 @@ const store = new Store({
     apiKey: ''
   }
 });
-let cachedFileApiKey = null;
-
 let mainWindow;
 
 function createWindow() {
@@ -814,17 +812,10 @@ async function enhanceImageLocally(buffer, mimeType, scale) {
 }
 
 async function readApiKeyFromFile() {
-  if (cachedFileApiKey !== null) {
-    return cachedFileApiKey;
-  }
-
   try {
     const content = await readFirstAccessibleFile(collectCandidateKeyPaths());
-    const fileKey = extractApiKey(content);
-    cachedFileApiKey = fileKey;
-    return fileKey;
+    return extractApiKey(content);
   } catch {
-    cachedFileApiKey = '';
     return '';
   }
 }
@@ -858,7 +849,6 @@ ipcMain.handle('clarityai:get-settings', async () => {
 ipcMain.handle('clarityai:save-settings', async (_event, payload) => {
   const apiKey = String(payload?.apiKey || '').trim();
   store.set('apiKey', apiKey);
-  cachedFileApiKey = apiKey || cachedFileApiKey;
   return { apiKey };
 });
 
