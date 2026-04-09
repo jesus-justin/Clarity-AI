@@ -330,16 +330,37 @@ async function selectBestGeminiCandidate(candidates, referenceBuffer) {
   }
 
   if (candidates.length === 1) {
-    return candidates[0];
+    return {
+      selected: candidates[0],
+      selectedScore: null,
+      candidateScores: [
+        {
+          score: null,
+          model: candidates[0].model,
+          endpoint: candidates[0].endpoint,
+          payloadVariant: candidates[0].payloadVariant,
+          promptVariant: candidates[0].promptVariant
+        }
+      ]
+    };
   }
 
   const referenceStats = await collectScoringStats(referenceBuffer);
   let bestCandidate = candidates[0];
   let bestScore = Number.NEGATIVE_INFINITY;
+  const candidateScores = [];
 
   for (const candidate of candidates) {
     const candidateStats = await collectScoringStats(candidate.buffer);
     const score = scoreGeminiCandidate(referenceStats, candidateStats);
+
+     candidateScores.push({
+      score,
+      model: candidate.model,
+      endpoint: candidate.endpoint,
+      payloadVariant: candidate.payloadVariant,
+      promptVariant: candidate.promptVariant
+    });
 
     if (score > bestScore) {
       bestScore = score;
@@ -347,7 +368,11 @@ async function selectBestGeminiCandidate(candidates, referenceBuffer) {
     }
   }
 
-  return bestCandidate;
+  return {
+    selected: bestCandidate,
+    selectedScore: bestScore,
+    candidateScores
+  };
 }
 
 async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhance) {
@@ -457,7 +482,11 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
 
             successfulCandidates.push({
               buffer: Buffer.from(encoded, 'base64'),
-              mimeType: outputMime
+              mimeType: outputMime,
+              model: modelName,
+              endpoint: endpointBase,
+              payloadVariant: variantIndex + 1,
+              promptVariant: promptVariants.indexOf(variantPrompt) + 1
             });
 
             if (successfulCandidates.length >= desiredCandidates) {
@@ -482,7 +511,22 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
   }
 
   if (successfulCandidates.length > 0) {
-    return selectBestGeminiCandidate(successfulCandidates, buffer);
+    const selection = await selectBestGeminiCandidate(successfulCandidates, buffer);
+    return {
+      buffer: selection.selected.buffer,
+      mimeType: selection.selected.mimeType,
+      meta: {
+        provider: 'gemini',
+        attempts: attemptErrors.length + successfulCandidates.length,
+        successfulCandidates: successfulCandidates.length,
+        selectedModel: selection.selected.model,
+        selectedEndpoint: selection.selected.endpoint,
+        selectedPayloadVariant: selection.selected.payloadVariant,
+        selectedPromptVariant: selection.selected.promptVariant,
+        selectedScore: selection.selectedScore,
+        candidateScores: selection.candidateScores
+      }
+    };
   }
 
   if (attemptErrors.length) {
@@ -782,6 +826,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
     let file;
     let usedCloud = false;
     let cloudProvider = 'local';
+    let enhancementMeta = null;
     if (usingCloud) {
       try {
         if (provider === 'replicate') {
@@ -837,6 +882,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
           });
 
           file = await enhanceImageWithGemini(apiKey, preparedInput.buffer, mimeType, scale, faceEnhance);
+          enhancementMeta = file?.meta || null;
 
           sendStatus(event.sender, {
             phase: 'downloading',
@@ -910,7 +956,8 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       fileName: `${baseName}-${outputSuffix}.${extension}`,
       dataUrl: bufferToDataUrl(polishedFile.buffer, polishedFile.mimeType),
       mimeType: polishedFile.mimeType,
-      provider: usedCloud ? cloudProvider : 'local'
+      provider: usedCloud ? cloudProvider : 'local',
+      meta: enhancementMeta
     };
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error || 'Enhancement failed.');

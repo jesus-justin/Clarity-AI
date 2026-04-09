@@ -69,6 +69,7 @@ function App() {
   const canEnhance = Boolean(selectedFile && !saving);
   const providerName = useMemo(() => detectProviderName(savedApiKey), [savedApiKey]);
   const activeOutputProvider = useMemo(() => mapProviderLabel(resultImage?.provider), [resultImage?.provider]);
+  const geminiDiagnostics = useMemo(() => formatGeminiDiagnostics(resultImage?.meta), [resultImage?.meta]);
 
   const statusTone = useMemo(() => {
     if (status.phase === 'completed') {
@@ -327,6 +328,7 @@ function App() {
             {!hasApiKey ? (
               <p className="status-note">Free local restoration is active. Add a Replicate or Gemini API key in Settings to use cloud enhancement.</p>
             ) : null}
+            {geminiDiagnostics ? <p className="status-note">{geminiDiagnostics}</p> : null}
             {error ? <p className="status-error">{error}</p> : null}
           </div>
         </section>
@@ -447,6 +449,20 @@ function mapProviderLabel(provider) {
   }
 
   return '';
+}
+
+function formatGeminiDiagnostics(meta) {
+  if (!meta || meta.provider !== 'gemini') {
+    return '';
+  }
+
+  const attempts = Number(meta.attempts || 0);
+  const candidates = Number(meta.successfulCandidates || 0);
+  const selectedModel = String(meta.selectedModel || '').trim();
+  const score = Number(meta.selectedScore);
+  const scoreText = Number.isFinite(score) ? score.toFixed(2) : 'n/a';
+
+  return `Gemini advanced mode: attempts ${attempts}, candidates ${candidates}, selected model ${selectedModel || 'unknown'}, quality score ${scoreText}.`;
 }
 
 export default App;
