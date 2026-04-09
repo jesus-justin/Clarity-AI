@@ -212,6 +212,10 @@ function formatGeminiErrorMessage(error) {
     return 'Gemini rate limit reached. Wait a moment, then retry enhancement.';
   }
 
+  if (/status code 404/iu.test(raw) || /404 Not Found/iu.test(raw)) {
+    return 'Gemini model endpoint was not found for this API key. Update the key permissions in Google AI Studio or try again with another Gemini key.';
+  }
+
   return raw;
 }
 
@@ -253,43 +257,66 @@ function buildRestorationPrompt(scale, faceEnhance) {
 }
 
 async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhance) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${encodeURIComponent(apiKey)}`;
   const prompt = buildRestorationPrompt(scale, faceEnhance);
 
-  const payload = {
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { text: prompt },
+  const modelCandidates = [
+    'gemini-2.0-flash-preview-image-generation',
+    'gemini-2.0-flash-exp',
+    'gemini-2.0-flash'
+  ];
+
+  let lastError = null;
+  for (const modelName of modelCandidates) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const payload = {
+        contents: [
           {
-            inline_data: {
-              mime_type: mimeType,
-              data: buffer.toString('base64')
-            }
+            role: 'user',
+            parts: [
+              { text: prompt },
+              {
+                inline_data: {
+                  mime_type: mimeType,
+                  data: buffer.toString('base64')
+                }
+              }
+            ]
           }
-        ]
+        ],
+        generationConfig: {
+          responseModalities: ['IMAGE']
+        }
+      };
+
+      const response = await axios.post(url, payload, { timeout: 120000 });
+      const parts = response?.data?.candidates?.[0]?.content?.parts || [];
+      const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
+      const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
+      const outputMime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || 'image/png';
+
+      if (!encoded) {
+        throw new Error(`Gemini model ${modelName} returned no image output.`);
       }
-    ],
-    generationConfig: {
-      responseModalities: ['TEXT', 'IMAGE']
+
+      return {
+        buffer: Buffer.from(encoded, 'base64'),
+        mimeType: outputMime
+      };
+    } catch (error) {
+      lastError = error;
+      const statusCode = Number(error?.response?.status || 0);
+
+      // Try the next model when this endpoint/model is not available.
+      if (statusCode === 404) {
+        continue;
+      }
+
+      throw error;
     }
-  };
-
-  const response = await axios.post(url, payload, { timeout: 120000 });
-  const parts = response?.data?.candidates?.[0]?.content?.parts || [];
-  const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
-
-  const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
-  const outputMime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || 'image/png';
-  if (!encoded) {
-    throw new Error('Gemini returned no image output.');
   }
 
-  return {
-    buffer: Buffer.from(encoded, 'base64'),
-    mimeType: outputMime
-  };
+  throw lastError || new Error('Gemini model endpoint not available for this key.');
 }
 
 function clampScale(inputScale) {
