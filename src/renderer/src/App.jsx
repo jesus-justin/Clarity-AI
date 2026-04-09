@@ -302,7 +302,8 @@ function App() {
                 <option value={2}>2x - light enhancement</option>
                 <option value={4}>4x - balanced HD (recommended)</option>
                 <option value={6}>6x - stronger detail recovery</option>
-                <option value={8}>8x - maximum detail boost</option>
+                <option value={8}>8x - 4K maximum detail (8192px limit)</option>
+                <option value={16}>16x - 8K ultra-maximum detail (8192px limit)</option>
               </select>
             </label>
 

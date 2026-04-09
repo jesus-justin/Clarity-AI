@@ -235,11 +235,17 @@ function detectApiProvider(apiKey) {
 async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhance) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${encodeURIComponent(apiKey)}`;
   const prompt = [
-    `Enhance this photo to clear high-definition quality at about ${scale}x perceived detail improvement.`,
-    'Preserve the exact person, pose, framing, and identity.',
-    'Reduce blur and noise while keeping natural colors and textures.',
-    faceEnhance ? 'Prioritize face clarity and natural skin detail.' : 'Do not over-smooth facial details.',
-    'Return an enhanced realistic photo, no stylization, no artistic effects.'
+    `CRITICAL: Upscale this image to the absolute highest possible resolution (aim for 8K 7680x4320 or maximum available).`,
+    `Preserve the EXACT original size, framing, composition, and subject proportions. NO cropping, zooming, stretching, or reframing.`,
+    `Only enhance quality by maximizing sharpness, ultra-fine details, clarity, and focus to the highest achievable level.`,
+    `Apply advanced AI detail enhancement to textures, eyes, skin, hair, and edges while maintaining 100% natural and realistic appearance.`,
+    `DO NOT modify, regenerate, beautify, alter any face, body, object, or background. Preserve original identity and details exactly.`,
+    `Maintain original colors, lighting, shadows, and tones precisely. NO artificial filters, color shifts, or over-processing.`,
+    `Eliminate noise, blur, and compression artifacts cleanly without losing natural texture.`,
+    `Ensure ultra-sharp focus, high dynamic range clarity, and crystal-clear detail across the entire image.`,
+    `Final result must be identical to the original in content and proportions, with only extreme high-quality resolution improvement.`,
+    faceEnhance ? `Prioritize facial detail enhancement - maximize eye clarity, skin texture detail, and micro-expressions.` : `Enhance all details uniformly without special facial focus.`,
+    `Output: Enhanced photo with NO distortion, NO edits, NO unnatural effects, NO artifacts.`
   ].join(' ');
 
   const payload = {
@@ -284,7 +290,8 @@ function clampScale(inputScale) {
     return 4;
   }
 
-  return Math.max(2, Math.min(8, Math.round(value)));
+  // Support up to 16x scaling for ultimate detail recovery (limited only by output size)
+  return Math.max(2, Math.min(16, Math.round(value)));
 }
 
 function calculateTargetSize(width, height, scale) {
@@ -295,7 +302,8 @@ function calculateTargetSize(width, height, scale) {
   let targetWidth = Math.round(sourceWidth * normalizedScale);
   let targetHeight = Math.round(sourceHeight * normalizedScale);
 
-  const maxSide = 4096;
+  // Allow up to 8K resolution (8192px max side) to support 8K output at 8x scale
+  const maxSide = 8192;
   const largestSide = Math.max(targetWidth, targetHeight);
   if (largestSide > maxSide) {
     const ratio = maxSide / largestSide;
@@ -310,11 +318,19 @@ async function preprocessInputImage(buffer, mimeType, scale) {
   const metadata = await sharp(buffer, { failOn: 'none' }).rotate().metadata();
   const { targetWidth, targetHeight } = calculateTargetSize(metadata.width, metadata.height, scale);
 
-  // Reduce blur/noise before enhancement so cloud/local upscaling receives a cleaner signal.
+  // Advanced preprocessing: denoise, normalize, and sharpen for maximum detail recovery
   const preprocessedBuffer = await sharp(buffer, { failOn: 'none' })
     .rotate()
+    // Normalize to optimize contrast and tonal range
     .normalize()
-    .sharpen({ sigma: 1.45, m1: 0.7, m2: 1.7, x1: 2, y2: 12, y3: 24 })
+    // First pass: gentle median-like denoise via slight blur then sharpen
+    .blur(0.3)
+    // Aggressive detail enhancement sharpen
+    .sharpen({ sigma: 1.8, m1: 0.85, m2: 2.0, x1: 3, y2: 15, y3: 28 })
+    // Second pass: ultra-sharp edge detection
+    .sharpen({ sigma: 1.2, m1: 0.9, m2: 2.1, x1: 2, y2: 12, y3: 24 })
+    // Modulate brightness and saturation for clarity
+    .modulate({ brightness: 1.03, saturation: 1.02 })
     .toBuffer();
 
   return {
@@ -326,28 +342,36 @@ async function preprocessInputImage(buffer, mimeType, scale) {
 }
 
 async function postprocessEnhancedImage(buffer, mimeType) {
+  // Advanced postprocessing: multiple sharpening passes with tone optimization for maximum clarity
   let pipeline = sharp(buffer, { failOn: 'none' })
     .rotate()
+    // Normalize to optimize final dynamic range
     .normalize()
-    .modulate({ brightness: 1.02, saturation: 1.04 })
-    .sharpen({ sigma: 1.35, m1: 0.8, m2: 1.9, x1: 2, y2: 11, y3: 22 });
+    // First sharpening pass: detail enhancement
+    .sharpen({ sigma: 1.5, m1: 0.85, m2: 2.0, x1: 3, y2: 14, y3: 26 })
+    // Modulate for optimal brightness and color saturation
+    .modulate({ brightness: 1.02, saturation: 1.06, hue: 0 })
+    // Second sharpening pass: ultra-sharp edges
+    .sharpen({ sigma: 1.1, m1: 0.92, m2: 2.2, x1: 2, y2: 11, y3: 21 })
+    // Final clarity enhancement
+    .modulate({ brightness: 1.01, saturation: 1.02 });
 
   if (mimeType === 'image/jpeg') {
     return {
-      buffer: await pipeline.jpeg({ quality: 96, mozjpeg: true }).toBuffer(),
+      buffer: await pipeline.jpeg({ quality: 98, mozjpeg: true, progressive: true }).toBuffer(),
       mimeType: 'image/jpeg'
     };
   }
 
   if (mimeType === 'image/webp') {
     return {
-      buffer: await pipeline.webp({ quality: 96 }).toBuffer(),
+      buffer: await pipeline.webp({ quality: 98, alphaQuality: 100 }).toBuffer(),
       mimeType: 'image/webp'
     };
   }
 
   return {
-    buffer: await pipeline.png({ quality: 96, compressionLevel: 8 }).toBuffer(),
+    buffer: await pipeline.png({ quality: 100, compressionLevel: 9, adaptiveFiltering: true }).toBuffer(),
     mimeType: 'image/png'
   };
 }
@@ -358,38 +382,53 @@ async function enhanceImageLocally(buffer, mimeType, scale) {
 
   const { targetWidth, targetHeight } = calculateTargetSize(metadata.width, metadata.height, scale);
 
-  // Two-step upscaling improves clarity on blurry faces more than a single aggressive resize.
+  // Multi-step upscaling with aggressive detail recovery
+  // Step 1: Initial upscale to 2x with lanczos3 (highest quality kernel)
   const intermediateWidth = Math.max(1, Math.round((metadata.width || targetWidth) * 2));
   const intermediateHeight = Math.max(1, Math.round((metadata.height || targetHeight) * 2));
 
   let pipeline = sharp(buffer, { failOn: 'none' })
     .rotate()
+    // Step 1: Upscale to 2x
     .resize(intermediateWidth, intermediateHeight, {
       kernel: sharp.kernel.lanczos3,
       fit: 'fill'
     })
-    .sharpen({ sigma: 1.55, m1: 0.8, m2: 1.8, x1: 2, y2: 12, y3: 24 })
+    // Normalize after first upscale
     .normalize()
-    .sharpen({ sigma: 1.3, m1: 0.65, m2: 1.5, x1: 2, y2: 10, y3: 20 });
+    // Ultra-aggressive sharpening after 2x upscale
+    .sharpen({ sigma: 1.8, m1: 0.9, m2: 2.1, x1: 3, y2: 16, y3: 30 })
+    // Second sharpening pass for edge clarity
+    .sharpen({ sigma: 1.3, m1: 0.85, m2: 1.9, x1: 2, y2: 12, y3: 24 })
+    // Brightness modulation for contrast enhancement
+    .modulate({ brightness: 1.04, saturation: 1.05 });
 
-  if (targetWidth > 0 && targetHeight > 0) {
-    pipeline = pipeline.resize(targetWidth, targetHeight, {
-      kernel: sharp.kernel.lanczos3,
-      fit: 'fill'
-    });
+  // Step 2: Second upscale to target resolution if needed
+  if (targetWidth > 0 && targetHeight > 0 && (targetWidth !== intermediateWidth || targetHeight !== intermediateHeight)) {
+    pipeline = pipeline
+      .resize(targetWidth, targetHeight, {
+        kernel: sharp.kernel.lanczos3,
+        fit: 'fill'
+      })
+      // Final aggressive sharpening at target resolution
+      .sharpen({ sigma: 1.5, m1: 0.88, m2: 2.0, x1: 3, y2: 14, y3: 26 })
+      .sharpen({ sigma: 1.1, m1: 0.92, m2: 2.2, x1: 2, y2: 11, y3: 21 });
   }
 
+  // Final modulation for maximum clarity
+  pipeline = pipeline.modulate({ brightness: 1.02, saturation: 1.04 });
+
   if (mimeType === 'image/jpeg') {
-    const outputBuffer = await pipeline.jpeg({ quality: 95, mozjpeg: true }).toBuffer();
+    const outputBuffer = await pipeline.jpeg({ quality: 98, mozjpeg: true, progressive: true }).toBuffer();
     return { buffer: outputBuffer, mimeType: 'image/jpeg' };
   }
 
   if (mimeType === 'image/webp') {
-    const outputBuffer = await pipeline.webp({ quality: 95 }).toBuffer();
+    const outputBuffer = await pipeline.webp({ quality: 98, alphaQuality: 100 }).toBuffer();
     return { buffer: outputBuffer, mimeType: 'image/webp' };
   }
 
-  const outputBuffer = await pipeline.png({ quality: 95, compressionLevel: 8 }).toBuffer();
+  const outputBuffer = await pipeline.png({ quality: 100, compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
   return { buffer: outputBuffer, mimeType: 'image/png' };
 }
 
