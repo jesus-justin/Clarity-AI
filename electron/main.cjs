@@ -264,6 +264,7 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
   const prompt = buildRestorationPrompt(scale, faceEnhance);
 
   const modelCandidates = [
+    'gemini-flash-latest',
     'gemini-2.0-flash-preview-image-generation',
     'gemini-2.0-flash-exp',
     'gemini-2.0-flash',
@@ -340,7 +341,13 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
       for (let variantIndex = 0; variantIndex < payloadVariants.length; variantIndex += 1) {
         try {
           const url = `${endpointBase}/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
-          const response = await axios.post(url, payloadVariants[variantIndex], { timeout: 120000 });
+          const response = await axios.post(url, payloadVariants[variantIndex], {
+            timeout: 120000,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-goog-api-key': apiKey
+            }
+          });
           const parts = response?.data?.candidates?.[0]?.content?.parts || [];
           const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
           const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
