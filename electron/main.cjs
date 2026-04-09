@@ -236,19 +236,19 @@ function buildRestorationPrompt(scale, faceEnhance) {
   const normalizedScale = clampScale(scale);
 
   return [
-    'You are a professional photo restoration model.',
-    'Upscale this image to the highest possible resolution supported, ideally 8K or maximum available, with the strongest possible clarity improvement.',
-    'Preserve the exact original content, framing, composition, perspective, and subject proportions.',
-    'Do not crop, zoom, reframe, stretch, beautify, regenerate, or change identity.',
-    'Treat the image as a restoration job, not a new generation.',
-    'Recover true detail from blur, noise, and compression artifacts while keeping the image natural and realistic.',
-    'Preserve original colors, lighting, shadows, skin tone, and background layout exactly.',
-    'Increase sharpness, micro-detail, texture fidelity, focus, and edge clarity without introducing artifacts.',
+    'Upscale this image to the highest possible resolution supported (preferably 8K, 7680x4320, or maximum available) while strictly preserving the exact original size, framing, composition, and subject proportions.',
+    'Do not crop, zoom, resize, stretch, or reframe the image in any way. Strictly maintain original distance, perspective, and subject scale.',
+    'Only enhance quality by significantly improving sharpness, ultra-fine details, clarity, and focus to the highest level possible.',
+    'Apply advanced AI detail enhancement to textures, eyes, skin, hair, and edges while keeping everything 100% natural and realistic.',
+    'Do NOT modify, regenerate, beautify, or alter any face, body, object, or background. Preserve original identity and details exactly.',
+    'Maintain original colors, lighting, shadows, and tones precisely. No artificial filters, no color shifts, no over-processing.',
+    'Eliminate noise, blur, and compression artifacts cleanly without losing natural texture.',
+    'Ensure ultra-sharp focus, high dynamic range clarity, and crystal-clear detail across the entire image.',
+    'Final result must be identical to the original image in content and proportions, with only extreme high-quality resolution improvement, no distortion, no edits, no unnatural effects.',
     faceEnhance
-      ? 'If faces are present, restore eyes, skin texture, lips, hair, and facial structure naturally without altering identity.'
-      : 'Do not add any face beautification or skin smoothing.',
-    `Target detail strength: ${normalizedScale}x perceived improvement with the cleanest possible restoration result.`,
-    'Final output must look like the same original photo, but clean, crisp, highly detailed, and higher resolution.'
+      ? 'Prioritize facial restoration for eyes, skin texture, and hair detail while preserving exact identity.'
+      : 'Apply uniform detail enhancement without special facial amplification.',
+    `Target restoration intensity: ${normalizedScale}x perceived detail recovery.`
   ].join(' ');
 }
 
@@ -532,17 +532,19 @@ async function resolveApiKey(preferredKey = '') {
     return explicitKey;
   }
 
+  // Prefer api_key.txt for packaged workflows so key swaps work without opening Settings.
+  const fromFile = await readApiKeyFromFile();
+  if (fromFile) {
+    store.set('apiKey', fromFile);
+    return fromFile;
+  }
+
   const stored = String(store.get('apiKey', '')).trim();
   if (stored) {
     return stored;
   }
 
-  const fromFile = await readApiKeyFromFile();
-  if (fromFile) {
-    store.set('apiKey', fromFile);
-  }
-
-  return fromFile;
+  return '';
 }
 
 ipcMain.handle('clarityai:get-settings', async () => {
@@ -697,7 +699,8 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
     return {
       fileName: `${baseName}-${outputSuffix}.${extension}`,
       dataUrl: bufferToDataUrl(polishedFile.buffer, polishedFile.mimeType),
-      mimeType: polishedFile.mimeType
+      mimeType: polishedFile.mimeType,
+      provider: usedCloud ? cloudProvider : 'local'
     };
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error || 'Enhancement failed.');

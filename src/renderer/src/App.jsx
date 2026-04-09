@@ -68,6 +68,7 @@ function App() {
   const hasApiKey = Boolean(savedApiKey.trim());
   const canEnhance = Boolean(selectedFile && !saving);
   const providerName = useMemo(() => detectProviderName(savedApiKey), [savedApiKey]);
+  const activeOutputProvider = useMemo(() => mapProviderLabel(resultImage?.provider), [resultImage?.provider]);
 
   const statusTone = useMemo(() => {
     if (status.phase === 'completed') {
@@ -339,7 +340,11 @@ function App() {
           />
           <PreviewCard
             title="After"
-            subtitle={hasApiKey ? `${providerName} cloud AI output` : 'Free local enhancement output'}
+            subtitle={activeOutputProvider
+              ? `${activeOutputProvider} output`
+              : hasApiKey
+                ? `${providerName} cloud AI output`
+                : 'Free local enhancement output'}
             src={resultImage?.dataUrl}
             emptyText="The enhanced result will appear here after processing."
             tone="accent"
@@ -426,6 +431,22 @@ function detectProviderName(apiKey) {
   }
 
   return 'Cloud';
+}
+
+function mapProviderLabel(provider) {
+  if (provider === 'gemini') {
+    return 'Gemini cloud AI';
+  }
+
+  if (provider === 'replicate') {
+    return 'Replicate cloud AI';
+  }
+
+  if (provider === 'local') {
+    return 'Free local enhancement';
+  }
+
+  return '';
 }
 
 export default App;
