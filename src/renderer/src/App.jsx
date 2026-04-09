@@ -297,13 +297,13 @@ function App() {
 
           <div className="enhancement-controls">
             <label className="enhancement-control">
-              Upscale strength
+              Restoration strength
               <select value={scale} onChange={(event) => setScale(Number(event.target.value))} disabled={saving}>
                 <option value={2}>2x - light enhancement</option>
                 <option value={4}>4x - balanced HD (recommended)</option>
                 <option value={6}>6x - stronger detail recovery</option>
-                <option value={8}>8x - 4K maximum detail (8192px limit)</option>
-                <option value={16}>16x - 8K ultra-maximum detail (8192px limit)</option>
+                <option value={8}>8x - extreme blur recovery (8192px limit)</option>
+                <option value={16}>16x - maximum restoration mode (8192px limit)</option>
               </select>
             </label>
 
@@ -324,7 +324,7 @@ function App() {
           <div className={`status-card ${statusTone}`}>
             <ProgressBar progress={status.progress} message={status.message} />
             {!hasApiKey ? (
-              <p className="status-note">Free local mode is active. Add a Replicate or Gemini API key in Settings to use cloud AI.</p>
+              <p className="status-note">Free local restoration is active. Add a Replicate or Gemini API key in Settings to use cloud enhancement.</p>
             ) : null}
             {error ? <p className="status-error">{error}</p> : null}
           </div>

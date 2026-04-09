@@ -232,21 +232,29 @@ function detectApiProvider(apiKey) {
   return 'unknown';
 }
 
+function buildRestorationPrompt(scale, faceEnhance) {
+  const normalizedScale = clampScale(scale);
+
+  return [
+    'You are a professional photo restoration model.',
+    'Upscale this image to the highest possible resolution supported, ideally 8K or maximum available, with the strongest possible clarity improvement.',
+    'Preserve the exact original content, framing, composition, perspective, and subject proportions.',
+    'Do not crop, zoom, reframe, stretch, beautify, regenerate, or change identity.',
+    'Treat the image as a restoration job, not a new generation.',
+    'Recover true detail from blur, noise, and compression artifacts while keeping the image natural and realistic.',
+    'Preserve original colors, lighting, shadows, skin tone, and background layout exactly.',
+    'Increase sharpness, micro-detail, texture fidelity, focus, and edge clarity without introducing artifacts.',
+    faceEnhance
+      ? 'If faces are present, restore eyes, skin texture, lips, hair, and facial structure naturally without altering identity.'
+      : 'Do not add any face beautification or skin smoothing.',
+    `Target detail strength: ${normalizedScale}x perceived improvement with the cleanest possible restoration result.`,
+    'Final output must look like the same original photo, but clean, crisp, highly detailed, and higher resolution.'
+  ].join(' ');
+}
+
 async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhance) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const prompt = [
-    `CRITICAL: Upscale this image to the absolute highest possible resolution (aim for 8K 7680x4320 or maximum available).`,
-    `Preserve the EXACT original size, framing, composition, and subject proportions. NO cropping, zooming, stretching, or reframing.`,
-    `Only enhance quality by maximizing sharpness, ultra-fine details, clarity, and focus to the highest achievable level.`,
-    `Apply advanced AI detail enhancement to textures, eyes, skin, hair, and edges while maintaining 100% natural and realistic appearance.`,
-    `DO NOT modify, regenerate, beautify, alter any face, body, object, or background. Preserve original identity and details exactly.`,
-    `Maintain original colors, lighting, shadows, and tones precisely. NO artificial filters, color shifts, or over-processing.`,
-    `Eliminate noise, blur, and compression artifacts cleanly without losing natural texture.`,
-    `Ensure ultra-sharp focus, high dynamic range clarity, and crystal-clear detail across the entire image.`,
-    `Final result must be identical to the original in content and proportions, with only extreme high-quality resolution improvement.`,
-    faceEnhance ? `Prioritize facial detail enhancement - maximize eye clarity, skin texture detail, and micro-expressions.` : `Enhance all details uniformly without special facial focus.`,
-    `Output: Enhanced photo with NO distortion, NO edits, NO unnatural effects, NO artifacts.`
-  ].join(' ');
+  const prompt = buildRestorationPrompt(scale, faceEnhance);
 
   const payload = {
     contents: [
@@ -323,14 +331,14 @@ async function preprocessInputImage(buffer, mimeType, scale) {
     .rotate()
     // Normalize to optimize contrast and tonal range
     .normalize()
-    // First pass: gentle median-like denoise via slight blur then sharpen
-    .blur(0.3)
+    // Preserve edges while reducing noise and compression artifacts.
+    .median(1)
     // Aggressive detail enhancement sharpen
-    .sharpen({ sigma: 1.8, m1: 0.85, m2: 2.0, x1: 3, y2: 15, y3: 28 })
-    // Second pass: ultra-sharp edge detection
-    .sharpen({ sigma: 1.2, m1: 0.9, m2: 2.1, x1: 2, y2: 12, y3: 24 })
-    // Modulate brightness and saturation for clarity
-    .modulate({ brightness: 1.03, saturation: 1.02 })
+    .sharpen({ sigma: 1.55, m1: 0.9, m2: 2.1, x1: 3, y2: 16, y3: 30 })
+    // Second pass: ultra-sharp edge recovery
+    .sharpen({ sigma: 1.0, m1: 0.94, m2: 2.2, x1: 2, y2: 12, y3: 24 })
+    // Modulate brightness and saturation for clarity without shifting tone
+    .modulate({ brightness: 1.02, saturation: 1.01 })
     .toBuffer();
 
   return {
@@ -341,20 +349,35 @@ async function preprocessInputImage(buffer, mimeType, scale) {
   };
 }
 
-async function postprocessEnhancedImage(buffer, mimeType) {
+async function postprocessEnhancedImage(buffer, mimeType, targetWidth, targetHeight) {
   // Advanced postprocessing: multiple sharpening passes with tone optimization for maximum clarity
-  let pipeline = sharp(buffer, { failOn: 'none' })
-    .rotate()
-    // Normalize to optimize final dynamic range
+  const source = sharp(buffer, { failOn: 'none' }).rotate();
+  const metadata = await source.metadata();
+
+  let pipeline = source;
+
+  if (
+    Number(targetWidth) > 0 &&
+    Number(targetHeight) > 0 &&
+    (Number(metadata.width) !== Number(targetWidth) || Number(metadata.height) !== Number(targetHeight))
+  ) {
+    pipeline = pipeline.resize(Number(targetWidth), Number(targetHeight), {
+      kernel: sharp.kernel.lanczos3,
+      fit: 'fill',
+      withoutEnlargement: false
+    });
+  }
+
+  pipeline = pipeline
     .normalize()
     // First sharpening pass: detail enhancement
-    .sharpen({ sigma: 1.5, m1: 0.85, m2: 2.0, x1: 3, y2: 14, y3: 26 })
+    .sharpen({ sigma: 1.7, m1: 0.92, m2: 2.15, x1: 3, y2: 15, y3: 28 })
     // Modulate for optimal brightness and color saturation
-    .modulate({ brightness: 1.02, saturation: 1.06, hue: 0 })
+    .modulate({ brightness: 1.01, saturation: 1.04, hue: 0 })
     // Second sharpening pass: ultra-sharp edges
-    .sharpen({ sigma: 1.1, m1: 0.92, m2: 2.2, x1: 2, y2: 11, y3: 21 })
+    .sharpen({ sigma: 1.05, m1: 0.96, m2: 2.3, x1: 2, y2: 11, y3: 22 })
     // Final clarity enhancement
-    .modulate({ brightness: 1.01, saturation: 1.02 });
+    .modulate({ brightness: 1.0, saturation: 1.02 });
 
   if (mimeType === 'image/jpeg') {
     return {
@@ -397,11 +420,11 @@ async function enhanceImageLocally(buffer, mimeType, scale) {
     // Normalize after first upscale
     .normalize()
     // Ultra-aggressive sharpening after 2x upscale
-    .sharpen({ sigma: 1.8, m1: 0.9, m2: 2.1, x1: 3, y2: 16, y3: 30 })
+    .sharpen({ sigma: 1.65, m1: 0.92, m2: 2.15, x1: 3, y2: 16, y3: 30 })
     // Second sharpening pass for edge clarity
-    .sharpen({ sigma: 1.3, m1: 0.85, m2: 1.9, x1: 2, y2: 12, y3: 24 })
+    .sharpen({ sigma: 1.05, m1: 0.95, m2: 2.1, x1: 2, y2: 12, y3: 24 })
     // Brightness modulation for contrast enhancement
-    .modulate({ brightness: 1.04, saturation: 1.05 });
+    .modulate({ brightness: 1.02, saturation: 1.03 });
 
   // Step 2: Second upscale to target resolution if needed
   if (targetWidth > 0 && targetHeight > 0 && (targetWidth !== intermediateWidth || targetHeight !== intermediateHeight)) {
@@ -411,12 +434,12 @@ async function enhanceImageLocally(buffer, mimeType, scale) {
         fit: 'fill'
       })
       // Final aggressive sharpening at target resolution
-      .sharpen({ sigma: 1.5, m1: 0.88, m2: 2.0, x1: 3, y2: 14, y3: 26 })
-      .sharpen({ sigma: 1.1, m1: 0.92, m2: 2.2, x1: 2, y2: 11, y3: 21 });
+      .sharpen({ sigma: 1.45, m1: 0.92, m2: 2.1, x1: 3, y2: 14, y3: 26 })
+      .sharpen({ sigma: 0.95, m1: 0.97, m2: 2.25, x1: 2, y2: 11, y3: 21 });
   }
 
   // Final modulation for maximum clarity
-  pipeline = pipeline.modulate({ brightness: 1.02, saturation: 1.04 });
+  pipeline = pipeline.modulate({ brightness: 1.01, saturation: 1.03 });
 
   if (mimeType === 'image/jpeg') {
     const outputBuffer = await pipeline.jpeg({ quality: 98, mozjpeg: true, progressive: true }).toBuffer();
@@ -610,7 +633,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       message: usedCloud ? `Enhancement complete (cloud AI: ${cloudProvider}).` : 'Enhancement complete (free local mode).'
     });
 
-    const polishedFile = await postprocessEnhancedImage(file.buffer, file.mimeType);
+    const polishedFile = await postprocessEnhancedImage(file.buffer, file.mimeType, preparedInput.targetWidth, preparedInput.targetHeight);
 
     const extension = mimeToExtension(polishedFile.mimeType);
     const baseName = path.parse(fileName).name || 'clarityai-result';
