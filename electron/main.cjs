@@ -264,8 +264,95 @@ function buildRestorationPrompt(scale, faceEnhance) {
   ].join(' ');
 }
 
+function buildGeminiPromptVariants(basePrompt, scale, faceEnhance) {
+  const normalizedScale = clampScale(scale);
+
+  return [
+    `${basePrompt} Priority mode: identity-safe restoration with natural texture preservation.`,
+    `${basePrompt} Aggressive blur recovery mode: maximize edge clarity, eye detail, hair strands, skin micro-texture, and anti-compression cleanup without changing composition or identity.`,
+    `${basePrompt} Precision mode: preserve original tones exactly and recover only authentic detail from blur and noise. ${faceEnhance ? 'Apply high-precision face detail restoration.' : 'Apply uniform detail restoration only.'} Scale intensity ${normalizedScale}x.`
+  ];
+}
+
+async function collectScoringStats(buffer) {
+  const normalized = await sharp(buffer, { failOn: 'none' })
+    .rotate()
+    .resize(768, 768, {
+      fit: 'fill',
+      kernel: sharp.kernel.lanczos3,
+      withoutEnlargement: false
+    })
+    .toBuffer();
+
+  const tonalStats = await sharp(normalized, { failOn: 'none' }).stats();
+  const edgeStats = await sharp(normalized, { failOn: 'none' })
+    .greyscale()
+    .convolve({
+      width: 3,
+      height: 3,
+      kernel: [
+        0, -1, 0,
+        -1, 4, -1,
+        0, -1, 0
+      ]
+    })
+    .stats();
+
+  return {
+    channels: tonalStats.channels || [],
+    edgeStd: edgeStats?.channels?.[0]?.stdev || 0
+  };
+}
+
+function scoreGeminiCandidate(referenceStats, candidateStats) {
+  const colorChannels = Math.min(3, referenceStats.channels.length, candidateStats.channels.length);
+
+  let colorDrift = 0;
+  let textureStd = 0;
+  for (let index = 0; index < colorChannels; index += 1) {
+    const ref = referenceStats.channels[index];
+    const cand = candidateStats.channels[index];
+    colorDrift += Math.abs((cand?.mean || 0) - (ref?.mean || 0)) / 255;
+    textureStd += cand?.stdev || 0;
+  }
+
+  if (colorChannels > 0) {
+    textureStd /= colorChannels;
+  }
+
+  // Favor strong edge/detail recovery while penalizing color drift from the source image.
+  return (candidateStats.edgeStd * 1.8) + (textureStd * 0.7) - (colorDrift * 35);
+}
+
+async function selectBestGeminiCandidate(candidates, referenceBuffer) {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    throw new Error('No Gemini candidates available for selection.');
+  }
+
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+
+  const referenceStats = await collectScoringStats(referenceBuffer);
+  let bestCandidate = candidates[0];
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    const candidateStats = await collectScoringStats(candidate.buffer);
+    const score = scoreGeminiCandidate(referenceStats, candidateStats);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestCandidate;
+}
+
 async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhance) {
   const prompt = buildRestorationPrompt(scale, faceEnhance);
+  const promptVariants = buildGeminiPromptVariants(prompt, scale, faceEnhance);
 
   const modelCandidates = [
     'gemini-flash-latest',
@@ -281,17 +368,22 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
     'https://generativelanguage.googleapis.com/v1'
   ];
 
+  const desiredCandidates = clampScale(scale) >= 8 ? 2 : 1;
+  const successfulCandidates = [];
+
   let lastError = null;
   const attemptErrors = [];
-  for (const modelName of modelCandidates) {
-    for (const endpointBase of endpointBases) {
+  outerLoop:
+  for (const variantPrompt of promptVariants) {
+    for (const modelName of modelCandidates) {
+      for (const endpointBase of endpointBases) {
       const payloadVariants = [
         {
           contents: [
             {
               role: 'user',
               parts: [
-                { text: prompt },
+                { text: variantPrompt },
                 {
                   inlineData: {
                     mimeType,
@@ -310,7 +402,7 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
             {
               role: 'user',
               parts: [
-                { text: `${prompt} Return only the enhanced image.` },
+                { text: `${variantPrompt} Return only the enhanced image.` },
                 {
                   inlineData: {
                     mimeType,
@@ -326,7 +418,7 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
             {
               role: 'user',
               parts: [
-                { text: `${prompt} Return only the enhanced image.` },
+                { text: `${variantPrompt} Return only the enhanced image.` },
                 {
                   inline_data: {
                     mime_type: mimeType,
@@ -343,45 +435,54 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
       ];
 
       for (let variantIndex = 0; variantIndex < payloadVariants.length; variantIndex += 1) {
-        try {
-          const url = `${endpointBase}/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
-          const response = await axios.post(url, payloadVariants[variantIndex], {
-            timeout: 120000,
-            headers: {
-              'Content-Type': 'application/json',
-              'X-goog-api-key': apiKey
+          try {
+            const url = `${endpointBase}/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+            const response = await axios.post(url, payloadVariants[variantIndex], {
+              timeout: 120000,
+              headers: {
+                'Content-Type': 'application/json',
+                'X-goog-api-key': apiKey
+              }
+            });
+            const parts = response?.data?.candidates?.[0]?.content?.parts || [];
+            const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
+            const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
+            const outputMime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || 'image/png';
+
+            if (!encoded) {
+              const noImageError = new Error(`Gemini ${modelName} ${endpointBase} variant ${variantIndex + 1} returned no image output.`);
+              noImageError.code = 'NO_IMAGE_OUTPUT';
+              throw noImageError;
             }
-          });
-          const parts = response?.data?.candidates?.[0]?.content?.parts || [];
-          const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
-          const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
-          const outputMime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || 'image/png';
 
-          if (!encoded) {
-            const noImageError = new Error(`Gemini ${modelName} ${endpointBase} variant ${variantIndex + 1} returned no image output.`);
-            noImageError.code = 'NO_IMAGE_OUTPUT';
-            throw noImageError;
+            successfulCandidates.push({
+              buffer: Buffer.from(encoded, 'base64'),
+              mimeType: outputMime
+            });
+
+            if (successfulCandidates.length >= desiredCandidates) {
+              break outerLoop;
+            }
+          } catch (error) {
+            lastError = error;
+            const statusCode = Number(error?.response?.status || 0);
+            const detail = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+            attemptErrors.push(`${modelName}@${endpointBase}#${variantIndex + 1}: ${statusCode || 'no-status'} ${detail}`);
+
+            // Continue trying other endpoint/model/payload combinations on known compatibility failures.
+            if (statusCode === 400 || statusCode === 401 || statusCode === 403 || statusCode === 404 || error?.code === 'NO_IMAGE_OUTPUT') {
+              continue;
+            }
+
+            throw error;
           }
-
-          return {
-            buffer: Buffer.from(encoded, 'base64'),
-            mimeType: outputMime
-          };
-        } catch (error) {
-          lastError = error;
-          const statusCode = Number(error?.response?.status || 0);
-          const detail = error?.response?.data?.error?.message || error?.message || 'Unknown error';
-          attemptErrors.push(`${modelName}@${endpointBase}#${variantIndex + 1}: ${statusCode || 'no-status'} ${detail}`);
-
-          // Continue trying other endpoint/model/payload combinations on known compatibility failures.
-          if (statusCode === 400 || statusCode === 401 || statusCode === 403 || statusCode === 404 || error?.code === 'NO_IMAGE_OUTPUT') {
-            continue;
-          }
-
-          throw error;
         }
       }
     }
+  }
+
+  if (successfulCandidates.length > 0) {
+    return selectBestGeminiCandidate(successfulCandidates, buffer);
   }
 
   if (attemptErrors.length) {
