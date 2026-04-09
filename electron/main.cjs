@@ -227,22 +227,6 @@ function formatGeminiErrorMessage(error) {
   return raw;
 }
 
-function isQuotaOrRateLimitError(provider, error) {
-  const statusCode = Number(error?.response?.status || 0);
-  const detail = JSON.stringify(error?.response?.data || '');
-  const raw = `${error?.message || ''} ${detail}`;
-
-  if (statusCode === 429) {
-    return true;
-  }
-
-  if (provider === 'gemini' && (statusCode === 403 || statusCode === 400)) {
-    return /RESOURCE_EXHAUSTED|quota|limit exceeded|exceeded your current quota/iu.test(raw);
-  }
-
-  return false;
-}
-
 function detectApiProvider(apiKey) {
   const key = String(apiKey || '').trim();
   if (!key) {
@@ -769,7 +753,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
           ? formatReplicateErrorMessage(cloudError)
           : formatGeminiErrorMessage(cloudError);
 
-        if (provider === 'gemini' && isQuotaOrRateLimitError(provider, cloudError)) {
+        if (provider === 'gemini') {
           sendStatus(event.sender, {
             phase: 'idle',
             progress: 0,
