@@ -260,12 +260,14 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
   const prompt = buildRestorationPrompt(scale, faceEnhance);
 
   const modelCandidates = [
-    'gemini-2.0-flash-preview-image-generation',
     'gemini-2.0-flash-exp',
-    'gemini-2.0-flash'
+    'gemini-2.0-flash-preview-image-generation',
+    'gemini-2.0-flash',
+    'gemini-1.5-pro-latest'
   ];
 
   let lastError = null;
+  const attemptErrors = [];
   for (const modelName of modelCandidates) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
@@ -285,7 +287,7 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
           }
         ],
         generationConfig: {
-          responseModalities: ['IMAGE']
+          responseModalities: ['TEXT', 'IMAGE']
         }
       };
 
@@ -296,7 +298,9 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
       const outputMime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || 'image/png';
 
       if (!encoded) {
-        throw new Error(`Gemini model ${modelName} returned no image output.`);
+        const noImageError = new Error(`Gemini model ${modelName} returned no image output.`);
+        noImageError.code = 'NO_IMAGE_OUTPUT';
+        throw noImageError;
       }
 
       return {
@@ -306,14 +310,20 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
     } catch (error) {
       lastError = error;
       const statusCode = Number(error?.response?.status || 0);
+      const detail = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+      attemptErrors.push(`${modelName}: ${statusCode || 'no-status'} ${detail}`);
 
-      // Try the next model when this endpoint/model is not available.
-      if (statusCode === 404) {
+      // Try the next model when endpoint/model permissions are not available for this key.
+      if (statusCode === 400 || statusCode === 403 || statusCode === 404 || error?.code === 'NO_IMAGE_OUTPUT') {
         continue;
       }
 
       throw error;
     }
+  }
+
+  if (attemptErrors.length) {
+    throw new Error(`Gemini model attempts failed. ${attemptErrors.join(' | ')}`);
   }
 
   throw lastError || new Error('Gemini model endpoint not available for this key.');
