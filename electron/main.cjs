@@ -216,11 +216,31 @@ function formatGeminiErrorMessage(error) {
     return 'Gemini rate limit reached. Wait a moment, then retry enhancement.';
   }
 
+  if (/RESOURCE_EXHAUSTED/iu.test(raw) || /quota|limit exceeded|exceeded your current quota/iu.test(raw)) {
+    return 'Gemini quota limit reached for this API key/project. Increase quota or switch to a key with available quota, then retry.';
+  }
+
   if (/status code 404/iu.test(raw) || /404 Not Found/iu.test(raw)) {
     return 'Gemini model endpoint was not found for this API key. Update the key permissions in Google AI Studio or try again with another Gemini key.';
   }
 
   return raw;
+}
+
+function isQuotaOrRateLimitError(provider, error) {
+  const statusCode = Number(error?.response?.status || 0);
+  const detail = JSON.stringify(error?.response?.data || '');
+  const raw = `${error?.message || ''} ${detail}`;
+
+  if (statusCode === 429) {
+    return true;
+  }
+
+  if (provider === 'gemini' && (statusCode === 403 || statusCode === 400)) {
+    return /RESOURCE_EXHAUSTED|quota|limit exceeded|exceeded your current quota/iu.test(raw);
+  }
+
+  return false;
 }
 
 function detectApiProvider(apiKey) {
@@ -748,6 +768,16 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
         const cloudMessage = provider === 'replicate'
           ? formatReplicateErrorMessage(cloudError)
           : formatGeminiErrorMessage(cloudError);
+
+        if (provider === 'gemini' && isQuotaOrRateLimitError(provider, cloudError)) {
+          sendStatus(event.sender, {
+            phase: 'idle',
+            progress: 0,
+            message: cloudMessage
+          });
+
+          throw new Error(cloudMessage);
+        }
 
         sendStatus(event.sender, {
           phase: 'processing',
