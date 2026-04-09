@@ -200,6 +200,10 @@ function formatReplicateErrorMessage(error) {
 function formatGeminiErrorMessage(error) {
   const raw = error instanceof Error ? error.message : String(error || 'Enhancement failed.');
 
+  if (/Gemini model attempts failed\./iu.test(raw)) {
+    return 'Gemini rejected all supported model endpoints for this key. Enable Gemini API and image generation access in Google AI Studio or use a key with proper permissions.';
+  }
+
   if (/status code 400/iu.test(raw) || /400 Bad Request/iu.test(raw)) {
     return 'Gemini request was rejected. Check the API key permissions or model access in Google AI Studio.';
   }
@@ -260,65 +264,112 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
   const prompt = buildRestorationPrompt(scale, faceEnhance);
 
   const modelCandidates = [
-    'gemini-2.0-flash-exp',
     'gemini-2.0-flash-preview-image-generation',
+    'gemini-2.0-flash-exp',
     'gemini-2.0-flash',
+    'gemini-1.5-flash-latest',
     'gemini-1.5-pro-latest'
+  ];
+
+  const endpointBases = [
+    'https://generativelanguage.googleapis.com/v1beta',
+    'https://generativelanguage.googleapis.com/v1'
   ];
 
   let lastError = null;
   const attemptErrors = [];
   for (const modelName of modelCandidates) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const payload = {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: prompt },
-              {
-                inline_data: {
-                  mime_type: mimeType,
-                  data: buffer.toString('base64')
+    for (const endpointBase of endpointBases) {
+      const payloadVariants = [
+        {
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: prompt },
+                {
+                  inlineData: {
+                    mimeType,
+                    data: buffer.toString('base64')
+                  }
                 }
-              }
-            ]
+              ]
+            }
+          ],
+          generationConfig: {
+            responseModalities: ['IMAGE', 'TEXT']
           }
-        ],
-        generationConfig: {
-          responseModalities: ['TEXT', 'IMAGE']
+        },
+        {
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: `${prompt} Return only the enhanced image.` },
+                {
+                  inlineData: {
+                    mimeType,
+                    data: buffer.toString('base64')
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: `${prompt} Return only the enhanced image.` },
+                {
+                  inline_data: {
+                    mime_type: mimeType,
+                    data: buffer.toString('base64')
+                  }
+                }
+              ]
+            }
+          ],
+          generationConfig: {
+            responseModalities: ['TEXT', 'IMAGE']
+          }
         }
-      };
+      ];
 
-      const response = await axios.post(url, payload, { timeout: 120000 });
-      const parts = response?.data?.candidates?.[0]?.content?.parts || [];
-      const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
-      const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
-      const outputMime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || 'image/png';
+      for (let variantIndex = 0; variantIndex < payloadVariants.length; variantIndex += 1) {
+        try {
+          const url = `${endpointBase}/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+          const response = await axios.post(url, payloadVariants[variantIndex], { timeout: 120000 });
+          const parts = response?.data?.candidates?.[0]?.content?.parts || [];
+          const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
+          const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
+          const outputMime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || 'image/png';
 
-      if (!encoded) {
-        const noImageError = new Error(`Gemini model ${modelName} returned no image output.`);
-        noImageError.code = 'NO_IMAGE_OUTPUT';
-        throw noImageError;
+          if (!encoded) {
+            const noImageError = new Error(`Gemini ${modelName} ${endpointBase} variant ${variantIndex + 1} returned no image output.`);
+            noImageError.code = 'NO_IMAGE_OUTPUT';
+            throw noImageError;
+          }
+
+          return {
+            buffer: Buffer.from(encoded, 'base64'),
+            mimeType: outputMime
+          };
+        } catch (error) {
+          lastError = error;
+          const statusCode = Number(error?.response?.status || 0);
+          const detail = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+          attemptErrors.push(`${modelName}@${endpointBase}#${variantIndex + 1}: ${statusCode || 'no-status'} ${detail}`);
+
+          // Continue trying other endpoint/model/payload combinations on known compatibility failures.
+          if (statusCode === 400 || statusCode === 401 || statusCode === 403 || statusCode === 404 || error?.code === 'NO_IMAGE_OUTPUT') {
+            continue;
+          }
+
+          throw error;
+        }
       }
-
-      return {
-        buffer: Buffer.from(encoded, 'base64'),
-        mimeType: outputMime
-      };
-    } catch (error) {
-      lastError = error;
-      const statusCode = Number(error?.response?.status || 0);
-      const detail = error?.response?.data?.error?.message || error?.message || 'Unknown error';
-      attemptErrors.push(`${modelName}: ${statusCode || 'no-status'} ${detail}`);
-
-      // Try the next model when endpoint/model permissions are not available for this key.
-      if (statusCode === 400 || statusCode === 403 || statusCode === 404 || error?.code === 'NO_IMAGE_OUTPUT') {
-        continue;
-      }
-
-      throw error;
     }
   }
 
