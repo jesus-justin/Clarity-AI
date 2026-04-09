@@ -238,7 +238,7 @@ function isGeminiCompatibilityError(statusCode, error) {
 }
 
 function isGeminiTransientError(statusCode, error) {
-  const transientStatusCodes = new Set([408, 425, 429, 500, 502, 503, 504]);
+  const transientStatusCodes = new Set([408, 425, 500, 502, 503, 504]);
   if (transientStatusCodes.has(statusCode)) {
     return true;
   }
@@ -263,12 +263,12 @@ function delay(ms) {
 }
 
 async function postGeminiWithRetry(url, payload, apiKey) {
-  const maxAttempts = 3;
+  const maxAttempts = 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       return await axios.post(url, payload, {
-        timeout: 120000,
+        timeout: 45000,
         headers: {
           'Content-Type': 'application/json',
           'X-goog-api-key': apiKey
@@ -464,10 +464,27 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
   ];
 
   const desiredCandidates = clampScale(scale) >= 8 ? 2 : 1;
+  const maxTotalAttempts = clampScale(scale) >= 8 ? 30 : 18;
   const successfulCandidates = [];
 
   let lastError = null;
   const attemptErrors = [];
+  let attemptedRequests = 0;
+
+  const reportAttemptProgress = (modelName, endpointBase, variantIndex) => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+
+    const boundedAttempt = Math.min(attemptedRequests, maxTotalAttempts);
+    const progress = Math.min(74, 45 + Math.floor((boundedAttempt / maxTotalAttempts) * 29));
+    sendStatus(mainWindow.webContents, {
+      phase: 'processing',
+      progress,
+      message: `Gemini processing attempt ${boundedAttempt}/${maxTotalAttempts} (${modelName}, payload ${variantIndex + 1}).`
+    });
+  };
+
   outerLoop:
   for (const variantPrompt of promptVariants) {
     for (const modelName of modelCandidates) {
@@ -530,7 +547,13 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
       ];
 
       for (let variantIndex = 0; variantIndex < payloadVariants.length; variantIndex += 1) {
+          if (attemptedRequests >= maxTotalAttempts && successfulCandidates.length === 0) {
+            break outerLoop;
+          }
+
           try {
+            attemptedRequests += 1;
+            reportAttemptProgress(modelName, endpointBase, variantIndex);
             const url = `${endpointBase}/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
             const response = await postGeminiWithRetry(url, payloadVariants[variantIndex], apiKey);
             const parts = response?.data?.candidates?.[0]?.content?.parts || [];
@@ -594,6 +617,10 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
   }
 
   if (attemptErrors.length) {
+    if (attemptedRequests >= maxTotalAttempts && successfulCandidates.length === 0) {
+      throw new Error('Gemini processing timed out after many attempts. Please retry with lower restoration strength (2x or 4x) or try again in a moment.');
+    }
+
     throw new Error(`Gemini model attempts failed. ${attemptErrors.join(' | ')}`);
   }
 
