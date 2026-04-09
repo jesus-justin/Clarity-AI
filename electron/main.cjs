@@ -216,6 +216,14 @@ function formatGeminiErrorMessage(error) {
     return 'Gemini rate limit reached. Wait a moment, then retry enhancement.';
   }
 
+  if (/status code 503/iu.test(raw) || /503 Service Unavailable/iu.test(raw)) {
+    return 'Gemini service is temporarily unavailable (503). The app retried multiple endpoints but Gemini is currently down. Please retry in a moment.';
+  }
+
+  if (/status code 500|status code 502|status code 504/iu.test(raw)) {
+    return 'Gemini service had a temporary server error. Please retry in a moment.';
+  }
+
   if (/RESOURCE_EXHAUSTED/iu.test(raw) || /quota|limit exceeded|exceeded your current quota/iu.test(raw)) {
     return 'Gemini quota limit reached for this API key/project. Increase quota or switch to a key with available quota, then retry.';
   }
@@ -225,6 +233,63 @@ function formatGeminiErrorMessage(error) {
   }
 
   return raw;
+}
+
+function isGeminiCompatibilityError(statusCode, error) {
+  return statusCode === 400 || statusCode === 401 || statusCode === 403 || statusCode === 404 || error?.code === 'NO_IMAGE_OUTPUT';
+}
+
+function isGeminiTransientError(statusCode, error) {
+  const transientStatusCodes = new Set([408, 425, 429, 500, 502, 503, 504]);
+  if (transientStatusCodes.has(statusCode)) {
+    return true;
+  }
+
+  const transientCodes = new Set([
+    'ECONNRESET',
+    'ECONNABORTED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'EHOSTUNREACH',
+    'ENETUNREACH'
+  ]);
+
+  return transientCodes.has(String(error?.code || '').toUpperCase());
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function postGeminiWithRetry(url, payload, apiKey) {
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await axios.post(url, payload, {
+        timeout: 120000,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-goog-api-key': apiKey
+        }
+      });
+    } catch (error) {
+      const statusCode = Number(error?.response?.status || 0);
+      const shouldRetry = attempt < maxAttempts && isGeminiTransientError(statusCode, error);
+
+      if (!shouldRetry) {
+        throw error;
+      }
+
+      const backoffMs = 350 * (2 ** (attempt - 1));
+      await delay(backoffMs);
+    }
+  }
+
+  throw new Error('Gemini request failed after retries.');
 }
 
 function detectApiProvider(apiKey) {
@@ -462,13 +527,7 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
       for (let variantIndex = 0; variantIndex < payloadVariants.length; variantIndex += 1) {
           try {
             const url = `${endpointBase}/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
-            const response = await axios.post(url, payloadVariants[variantIndex], {
-              timeout: 120000,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-goog-api-key': apiKey
-              }
-            });
+            const response = await postGeminiWithRetry(url, payloadVariants[variantIndex], apiKey);
             const parts = response?.data?.candidates?.[0]?.content?.parts || [];
             const imagePart = parts.find((part) => part?.inline_data?.data || part?.inlineData?.data);
             const encoded = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
@@ -498,8 +557,8 @@ async function enhanceImageWithGemini(apiKey, buffer, mimeType, scale, faceEnhan
             const detail = error?.response?.data?.error?.message || error?.message || 'Unknown error';
             attemptErrors.push(`${modelName}@${endpointBase}#${variantIndex + 1}: ${statusCode || 'no-status'} ${detail}`);
 
-            // Continue trying other endpoint/model/payload combinations on known compatibility failures.
-            if (statusCode === 400 || statusCode === 401 || statusCode === 403 || statusCode === 404 || error?.code === 'NO_IMAGE_OUTPUT') {
+            // Continue trying other endpoint/model/payload combinations on known compatibility or transient failures.
+            if (isGeminiCompatibilityError(statusCode, error) || isGeminiTransientError(statusCode, error)) {
               continue;
             }
 
