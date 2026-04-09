@@ -322,6 +322,59 @@ function calculateTargetSize(width, height, scale) {
   return { targetWidth, targetHeight, normalizedScale };
 }
 
+function getRestorationStrength(scale) {
+  const normalizedScale = clampScale(scale);
+
+  if (normalizedScale >= 16) {
+    return 'extreme';
+  }
+
+  if (normalizedScale >= 8) {
+    return 'high';
+  }
+
+  return 'standard';
+}
+
+function createDetailRecoveryPipeline(pipeline, targetWidth, targetHeight, scale) {
+  const strength = getRestorationStrength(scale);
+  const oversampleFactor = strength === 'extreme' ? 1.85 : strength === 'high' ? 1.55 : 1.25;
+  const detailWidth = Math.max(1, Math.round(Number(targetWidth) * oversampleFactor));
+  const detailHeight = Math.max(1, Math.round(Number(targetHeight) * oversampleFactor));
+
+  return pipeline
+    .resize(detailWidth, detailHeight, {
+      kernel: sharp.kernel.lanczos3,
+      fit: 'fill',
+      withoutEnlargement: false
+    })
+    .normalize()
+    .sharpen(
+      strength === 'extreme'
+        ? { sigma: 1.1, m1: 0.98, m2: 2.35, x1: 2, y2: 11, y3: 22 }
+        : strength === 'high'
+          ? { sigma: 1.2, m1: 0.96, m2: 2.25, x1: 2, y2: 11, y3: 21 }
+          : { sigma: 1.3, m1: 0.94, m2: 2.15, x1: 2, y2: 12, y3: 22 }
+    )
+    .resize(Number(targetWidth), Number(targetHeight), {
+      kernel: sharp.kernel.lanczos3,
+      fit: 'fill',
+      withoutEnlargement: false
+    })
+    .sharpen(
+      strength === 'extreme'
+        ? { sigma: 0.9, m1: 0.99, m2: 2.4, x1: 2, y2: 10, y3: 20 }
+        : strength === 'high'
+          ? { sigma: 0.95, m1: 0.98, m2: 2.3, x1: 2, y2: 10, y3: 20 }
+          : { sigma: 1.0, m1: 0.97, m2: 2.2, x1: 2, y2: 10, y3: 20 }
+    )
+    .modulate({
+      brightness: 1.0,
+      saturation: 1.0,
+      hue: 0
+    });
+}
+
 async function preprocessInputImage(buffer, mimeType, scale) {
   const metadata = await sharp(buffer, { failOn: 'none' }).rotate().metadata();
   const { targetWidth, targetHeight } = calculateTargetSize(metadata.width, metadata.height, scale);
@@ -349,7 +402,7 @@ async function preprocessInputImage(buffer, mimeType, scale) {
   };
 }
 
-async function postprocessEnhancedImage(buffer, mimeType, targetWidth, targetHeight) {
+async function postprocessEnhancedImage(buffer, mimeType, targetWidth, targetHeight, scale) {
   // Advanced postprocessing: multiple sharpening passes with tone optimization for maximum clarity
   const source = sharp(buffer, { failOn: 'none' }).rotate();
   const metadata = await source.metadata();
@@ -371,13 +424,15 @@ async function postprocessEnhancedImage(buffer, mimeType, targetWidth, targetHei
   pipeline = pipeline
     .normalize()
     // First sharpening pass: detail enhancement
-    .sharpen({ sigma: 1.7, m1: 0.92, m2: 2.15, x1: 3, y2: 15, y3: 28 })
-    // Modulate for optimal brightness and color saturation
-    .modulate({ brightness: 1.01, saturation: 1.04, hue: 0 })
+    .sharpen({ sigma: 1.5, m1: 0.95, m2: 2.2, x1: 3, y2: 15, y3: 28 })
+    // Modulate for optimal brightness and color saturation while staying close to the original
+    .modulate({ brightness: 1.0, saturation: 1.01, hue: 0 })
     // Second sharpening pass: ultra-sharp edges
-    .sharpen({ sigma: 1.05, m1: 0.96, m2: 2.3, x1: 2, y2: 11, y3: 22 })
+    .sharpen({ sigma: 0.9, m1: 0.98, m2: 2.35, x1: 2, y2: 11, y3: 22 })
     // Final clarity enhancement
-    .modulate({ brightness: 1.0, saturation: 1.02 });
+    .modulate({ brightness: 1.0, saturation: 1.0 });
+
+  pipeline = createDetailRecoveryPipeline(pipeline, targetWidth || metadata.width || 1, targetHeight || metadata.height || 1, scale);
 
   if (mimeType === 'image/jpeg') {
     return {
@@ -420,11 +475,11 @@ async function enhanceImageLocally(buffer, mimeType, scale) {
     // Normalize after first upscale
     .normalize()
     // Ultra-aggressive sharpening after 2x upscale
-    .sharpen({ sigma: 1.65, m1: 0.92, m2: 2.15, x1: 3, y2: 16, y3: 30 })
+    .sharpen({ sigma: 1.6, m1: 0.94, m2: 2.2, x1: 3, y2: 16, y3: 30 })
     // Second sharpening pass for edge clarity
-    .sharpen({ sigma: 1.05, m1: 0.95, m2: 2.1, x1: 2, y2: 12, y3: 24 })
+    .sharpen({ sigma: 0.95, m1: 0.97, m2: 2.2, x1: 2, y2: 12, y3: 24 })
     // Brightness modulation for contrast enhancement
-    .modulate({ brightness: 1.02, saturation: 1.03 });
+    .modulate({ brightness: 1.0, saturation: 1.01 });
 
   // Step 2: Second upscale to target resolution if needed
   if (targetWidth > 0 && targetHeight > 0 && (targetWidth !== intermediateWidth || targetHeight !== intermediateHeight)) {
@@ -434,12 +489,12 @@ async function enhanceImageLocally(buffer, mimeType, scale) {
         fit: 'fill'
       })
       // Final aggressive sharpening at target resolution
-      .sharpen({ sigma: 1.45, m1: 0.92, m2: 2.1, x1: 3, y2: 14, y3: 26 })
-      .sharpen({ sigma: 0.95, m1: 0.97, m2: 2.25, x1: 2, y2: 11, y3: 21 });
+      .sharpen({ sigma: 1.3, m1: 0.95, m2: 2.2, x1: 3, y2: 14, y3: 26 })
+      .sharpen({ sigma: 0.85, m1: 0.99, m2: 2.35, x1: 2, y2: 11, y3: 21 });
   }
 
   // Final modulation for maximum clarity
-  pipeline = pipeline.modulate({ brightness: 1.01, saturation: 1.03 });
+  pipeline = pipeline.modulate({ brightness: 1.0, saturation: 1.0 });
 
   if (mimeType === 'image/jpeg') {
     const outputBuffer = await pipeline.jpeg({ quality: 98, mozjpeg: true, progressive: true }).toBuffer();
@@ -633,7 +688,7 @@ ipcMain.handle('clarityai:enhance-image', async (event, payload) => {
       message: usedCloud ? `Enhancement complete (cloud AI: ${cloudProvider}).` : 'Enhancement complete (free local mode).'
     });
 
-    const polishedFile = await postprocessEnhancedImage(file.buffer, file.mimeType, preparedInput.targetWidth, preparedInput.targetHeight);
+    const polishedFile = await postprocessEnhancedImage(file.buffer, file.mimeType, preparedInput.targetWidth, preparedInput.targetHeight, scale);
 
     const extension = mimeToExtension(polishedFile.mimeType);
     const baseName = path.parse(fileName).name || 'clarityai-result';
